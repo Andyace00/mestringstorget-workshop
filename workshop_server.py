@@ -493,6 +493,150 @@ async def get_context():
     return JSONResponse(WORKSHOP_CONTEXT)
 
 
+def build_sentence_prompt() -> str:
+    """Bygg en rik prompt for å lage 'Mestringstorget i Nordre Follo er...' basert på all workshop-data."""
+    ctx = WORKSHOP_CONTEXT
+    parts = []
+
+    # Rolle + domene
+    parts.append(
+        f"# ROLLE\nDu fasiliterer en workshop for ledergruppen i Helse og mestring i Nordre Follo kommune. "
+        f"Du skal nå hjelpe dem med å formulere én felles setning som oppsummerer hva mestringstorget SKAL VÆRE, "
+        f"basert på alt de har kommet frem til i workshopen."
+    )
+
+    dom = ctx.get("domene", {})
+    if dom:
+        parts.append(
+            f"# DOMENE\n{dom.get('navn', '')}: {dom.get('definisjon', '')}\n\n"
+            f"Ambisjon: {dom.get('ambisjon', '')}"
+        )
+
+    # Nasjonal kontekst
+    nk = ctx.get("nasjonal_kontekst", {}).get("helseministeren_10_april_2026", {})
+    if nk:
+        parts.append(
+            f"# NASJONAL KONTEKST\n"
+            f"{nk.get('sitat_hovedmål', '')} — Helseminister Vestre, {nk.get('kilde', '')}.\n"
+            f"{nk.get('betydning', '')}"
+        )
+
+    # Oppgave og regler
+    sp = ctx.get("en_setning_prompt", {})
+    if sp:
+        parts.append(f"# DIN OPPGAVE\n{sp.get('oppgave', '')}")
+        parts.append(f"# FORMAT\n{sp.get('format', '')}")
+        if sp.get("regler"):
+            parts.append("# REGLER\n" + "\n".join(f"- {r}" for r in sp.get("regler", [])))
+
+    # Alle innspill fra workshopen
+    parts.append("# INNSPILL FRA WORKSHOPEN")
+
+    # Hva tar vi med oss
+    mok = collect_round_items_text("mok")
+    if mok:
+        parts.append("## Hva deltakerne vil unngå (slide 6):\n" + "\n".join(f"- {s}" for s in mok))
+
+    # Karis nye reise
+    journeys = STATE["rounds"].get("journey", {}).get("journeys", {})
+    if journeys:
+        parts.append("## Karis nye reise, designet av deltakerne (slide 10):")
+        for uid, j in journeys.items():
+            name = j.get("user_name", "Anonym")
+            steps = " → ".join(j.get("steps", []))
+            parts.append(f"- {name}: Kontakter mestringstorget → {steps} → Mestrer hverdagen")
+
+    # Dot-voting top 3
+    dotvote = STATE["rounds"].get("dotvote", {})
+    options = dotvote.get("options", [])
+    votes = dotvote.get("votes", {})
+    if options and votes:
+        counts = {o["id"]: 0 for o in options}
+        for arr in votes.values():
+            for oid in arr:
+                if oid in counts:
+                    counts[oid] += 1
+        ranked = sorted(options, key=lambda o: counts[o["id"]], reverse=True)
+        top3 = [f"{o['text']} ({counts[o['id']]} stemmer)" for o in ranked[:3] if counts[o["id"]] > 0]
+        if top3:
+            parts.append("## Top 3 prioritert av ledergruppen (slide 12):\n" + "\n".join(f"- {s}" for s in top3))
+
+    # Tre retningsvalg
+    for rid, label in [("who", "Hvem sitter i mestringstorget (slide 15)"),
+                       ("replace", "Hva erstatter vi (slide 16)"),
+                       ("format", "Fysisk/digitalt format (slide 17)")]:
+        items = collect_round_items_text(rid)
+        if items:
+            parts.append(f"## Retningsvalg — {label}:\n" + "\n".join(f"- {s}" for s in items))
+
+    # Forpliktelsen
+    commit_items = collect_round_items_text("commit")
+    if commit_items:
+        parts.append("## Forpliktelsen — det som MÅ skje (slide 19):\n" + "\n".join(f"- {s}" for s in commit_items))
+
+    parts.append(
+        "# OUTPUT\n"
+        "Returner KUN selve setningen som ren tekst. Ingen forklaring, ingen anførselstegn, ingen markdown. "
+        "Hvis det ikke er nok input til å lage en meningsfull setning, returner teksten: "
+        "INGEN_INPUT_ENNA"
+    )
+
+    return "\n\n".join(parts)
+
+
+def gemini_generate_sentence():
+    """Kall Gemini for å generere 'Mestringstorget i Nordre Follo er...' setningen."""
+    if not gemini_client:
+        return None, None
+    prompt = build_sentence_prompt()
+    try:
+        from google.genai import types
+        resp = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.5,  # litt høyere for kreativitet
+            ),
+        )
+        text = (resp.text or "").strip()
+        # Rydd bort evt anførselstegn og markdown
+        text = text.strip('"').strip("'").strip('«').strip('»').strip()
+        if text.startswith("```"):
+            text = text.split("```")[1].strip()
+            if text.startswith("text"):
+                text = text[4:].strip()
+        if text == "INGEN_INPUT_ENNA" or not text:
+            return None, prompt
+        return text, prompt
+    except Exception as e:
+        print(f"[Gemini] setning feilet: {e}")
+        return None, prompt
+
+
+@app.post("/api/generate-sentence")
+async def api_generate_sentence():
+    """Generer 'Mestringstorget i Nordre Follo er...' setningen basert på all workshop-data."""
+    if not gemini_client:
+        return JSONResponse({
+            "error": "Gemini er ikke konfigurert — sett GEMINI_API_KEY på Render",
+            "ai_used": False
+        }, status_code=200)
+
+    sentence, prompt = gemini_generate_sentence()
+    if not sentence:
+        return JSONResponse({
+            "error": "Kunne ikke generere setning — for lite input fra workshopen?",
+            "ai_used": False
+        }, status_code=200)
+
+    return {
+        "ok": True,
+        "ai_used": True,
+        "sentence": sentence,
+        "prompt_length": len(prompt) if prompt else 0,
+    }
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
@@ -532,6 +676,7 @@ async def handle_message(data: dict, ws: WebSocket):
                 "user_name": STATE["participants"].get(data.get("user_id", ""), "Anonym"),
                 "value": data.get("value", "").strip(),
                 "category": data.get("category"),  # for categorized
+                "source_id": data.get("source_id"),  # peker tilbake til originallapp hvis sortering
                 "cluster": None,
                 "ts": datetime.now().isoformat(),
             }
@@ -724,6 +869,13 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .rating-btn.selected { background:var(--teal); border-color:var(--teal-l); transform: scale(1.1); }
 .rating-labels { display:flex; justify-content:space-between; font-size:11px; color:#888; }
 
+/* Sorteringskort for categorized-runden (BEHOLD/ENDRE/SLIPP) */
+.sort-item { background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); border-radius:10px; padding:12px; margin-bottom:8px; }
+.sort-item .sort-text { font-size:14px; color:#fff; font-weight:500; }
+.sort-item .sort-author { font-size:11px; color:#888; margin-top:4px; font-style:italic; }
+.sort-item .sort-buttons { display:flex; gap:6px; margin-top:10px; }
+.sort-item .sort-buttons button { flex:1; padding:8px 0; font-size:12px; margin:0; }
+
 /* Journey builder */
 .journey-builder { margin-top:14px; }
 .j-step { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
@@ -864,18 +1016,45 @@ function render() {
       </div>`;
   } else if (r.type === 'categorized') {
     const mine = myItems(rid);
+
+    // Hent lapper fra mok-runden som ikke allerede er sortert inn i denne runden
+    const mokItems = (state.rounds.mok && state.rounds.mok.items) || [];
+    const alreadySorted = new Set((r.items || []).map(i => i.source_id).filter(Boolean));
+    const toSort = mokItems.filter(it => !alreadySorted.has(it.id));
+
     content.innerHTML = `
       <div class="card active">
-        <div class="label">Aktiv runde</div>
+        <div class="label">Aktiv runde — sortering</div>
         <div class="title">${r.title}</div>
         <div class="question">${r.question}</div>
-        <div class="input-area">
-          <textarea id="ta" placeholder="Skriv din lapp her..."></textarea>
+
+        ${toSort.length > 0 ? `
+          <div style="margin-top:14px;background:rgba(0,0,0,.25);border-radius:10px;padding:12px;">
+            <div style="font-size:11px;color:var(--teal-l);letter-spacing:1.5px;text-transform:uppercase;font-weight:700;margin-bottom:8px;">Lapper fra forrige runde &mdash; klikk for å sortere</div>
+            <div id="sort-queue">
+              ${toSort.map(it => `
+                <div class="sort-item" data-source-id="${it.id}">
+                  <div class="sort-text">${escape(it.value)}</div>
+                  <div class="sort-author">${escape(it.user_name || 'Anonym')}</div>
+                  <div class="sort-buttons">
+                    ${r.categories.map(c => `<button class="cat-${c}" onclick="sortItem('${it.id}', ${JSON.stringify(it.value).replace(/"/g,'&quot;')}, '${c}')">${c}</button>`).join('')}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        <div class="input-area" style="margin-top:14px;">
+          <div style="font-size:13px;color:#888;margin-bottom:8px;">Eller skriv ny lapp:</div>
+          <textarea id="ta" placeholder="Ny lapp her..."></textarea>
           <div class="cat-buttons">
             ${r.categories.map(c => `<button class="cat-${c}" onclick="sendCat('${c}')">${c}</button>`).join('')}
           </div>
         </div>
+
         <div class="my-items">
+          ${mine.length > 0 ? `<div style="font-size:11px;color:#888;letter-spacing:1.5px;text-transform:uppercase;margin-top:14px;margin-bottom:6px;">Sortert av deg (${mine.length})</div>` : ''}
           ${mine.map(i => `<div class="my-item"><span><strong style="color:var(--teal-l)">[${i.category}]</strong> ${escape(i.value)}</span><button onclick="deleteItem('${rid}','${i.id}')">Slett</button></div>`).join('')}
         </div>
       </div>`;
@@ -986,6 +1165,15 @@ function sendOne() {
   if (!v) return;
   submitItem(ar[0], v);
   ta.value = '';
+}
+
+function sortItem(sourceId, value, cat) {
+  const ar = activeRound();
+  if (!ar) return;
+  ws.send(JSON.stringify({
+    type:'submit', round_id:ar[0], user_id:userId,
+    value: value, category: cat, source_id: sourceId
+  }));
 }
 
 function sendCat(cat) {
