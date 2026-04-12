@@ -188,10 +188,29 @@ DEFAULT_ROUNDS = {
 
 
 def load_state():
+    """Last lagret state og merge inn DEFAULT_ROUNDS sine metadata (title, question, type, parent).
+    Bruker-input (items, journeys, ratings, votes, options) beholdes fra lagret data."""
     if DATA_FILE.exists():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                saved = json.load(f)
+            # Merge: sørg for at alle default-runder finnes, og at metadata fra DEFAULT_ROUNDS brukes
+            default_copy = json.loads(json.dumps(DEFAULT_ROUNDS))
+            saved_rounds = saved.get("rounds", {})
+            merged_rounds = {}
+            for rid, default_r in default_copy.items():
+                if rid in saved_rounds:
+                    # Ta metadata fra default (title, question, type, parent, categories, etc.)
+                    merged = dict(default_r)
+                    # Overstyrer data-feltene fra saved
+                    for data_field in ("items", "journeys", "ratings", "votes", "options", "consensus", "active"):
+                        if data_field in saved_rounds[rid]:
+                            merged[data_field] = saved_rounds[rid][data_field]
+                    merged_rounds[rid] = merged
+                else:
+                    merged_rounds[rid] = default_r
+            saved["rounds"] = merged_rounds
+            return saved
         except Exception as e:
             print(f"Feil ved lasting: {e}")
     return {
