@@ -1,0 +1,16 @@
+name: Keep Render awake
+
+on:
+  schedule:
+    # Hvert 10. minutt (Render free tier sover etter 15 min inaktivitet)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:  # tillat manuell kjoring
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render server
+        run: |
+          curl -fsSL -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+            https://mestringstorget-workshop.onrender.com/api/state
