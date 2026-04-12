@@ -1,0 +1,1011 @@
+"""
+Mestringstorget Workshop Server
+================================
+FastAPI + WebSocket server for live digital input fra deltakere.
+
+Arkitektur:
+  - Fasilitator-PC kjorer denne serveren
+  - Alle deltakere apner http://<fasilitator-IP>:8000/p i nettleser
+  - Presentasjonen apner http://<fasilitator-IP>:8000/ (eller localhost)
+  - All input lagres i workshop_data.json (auto-saved kontinuerlig)
+  - WebSocket gir live-oppdateringer alle veier
+
+Rounds (input-runder):
+  1. mok          - Hva tar vi med oss (slide 6)
+  2. behold       - BEHOLD/ENDRE/SLIPP sortering (slide 7)
+  3. journey      - Karis nye reise (slide 10)
+  4. dotvote      - Prioritering (slide 12)
+  5. who          - Hvem sitter i mestringstorget (slide 15)
+  6. replace      - Hva erstatter vi (slide 16)
+  7. format       - Fysisk/digitalt (slide 17)
+  8. commit       - Forpliktelsen (slide 19)
+  9. consensus    - Konsensussjekk pa hele tavlen (slide 20)
+
+Kjor:
+  python workshop_server.py
+
+Apne:
+  http://localhost:8000/admin     - Fasilitator-kontroller
+  http://localhost:8000/wall      - Live wall (vises pa storskjerm)
+  http://localhost:8000/p         - Deltaker-input
+  http://localhost:8000/export    - Last ned full rapport
+"""
+import os
+import json
+import asyncio
+import socket
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Set
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+
+BASE_DIR = Path(__file__).parent
+DATA_FILE = BASE_DIR / "workshop_data.json"
+
+app = FastAPI(title="Mestringstorget Workshop Server")
+
+# Mount static files only if they exist (de finnes lokalt, ikke i sky-deploy)
+SCENE_IMAGES_DIR = BASE_DIR / "scene_images"
+if SCENE_IMAGES_DIR.exists():
+    app.mount("/scene_images", StaticFiles(directory=str(SCENE_IMAGES_DIR)), name="scene_images")
+
+# ---------- DATA MODEL ----------
+
+DEFAULT_ROUNDS = {
+    "mok": {
+        "title": "Hva tar vi med oss",
+        "question": "Hva er du som leder mest opptatt av at vi unngår — når vi nå starter på nytt?",
+        "type": "freetext",
+        "items": [],
+        "active": False,
+    },
+    "behold": {
+        "title": "Behold / Endre / Slipp",
+        "question": "Sorter funnene i tre kategorier",
+        "type": "categorized",
+        "categories": ["Behold", "Endre", "Slipp"],
+        "items": [],
+        "active": False,
+    },
+    "journey": {
+        "title": "Karis nye reise",
+        "question": "Design Karis reise gjennom mestringstorget — hvert steg",
+        "type": "freetext",
+        "items": [],
+        "active": False,
+    },
+    "dotvote": {
+        "title": "Prioritering",
+        "question": "Hva er viktigst for oss? Bruk 3 stemmer",
+        "type": "vote",
+        "options": [],
+        "votes": {},  # user_id -> [option_id, ...]
+        "active": False,
+    },
+    "who": {
+        "title": "Retningsvalg 1: Hvem sitter i mestringstorget",
+        "question": "Hvilken kompetanse må sitte i mestringstorget?",
+        "type": "freetext",
+        "items": [],
+        "consensus": [],  # list of {user_id, value}
+        "active": False,
+    },
+    "replace": {
+        "title": "Retningsvalg 2: Hva erstatter vi",
+        "question": "Hva bør mestringstorget erstatte? Hva bør det IKKE erstatte?",
+        "type": "freetext",
+        "items": [],
+        "consensus": [],
+        "active": False,
+    },
+    "format": {
+        "title": "Retningsvalg 3: Fysisk, digitalt eller begge",
+        "question": "Hvordan ser mestringstorget ut? Hvor møter innbyggeren oss?",
+        "type": "freetext",
+        "items": [],
+        "consensus": [],
+        "active": False,
+    },
+    "commit": {
+        "title": "Forpliktelsen",
+        "question": "Hva er det viktigste som MÅ skje for at mestringstorget skal bli virkelighet?",
+        "type": "freetext",
+        "items": [],
+        "active": False,
+    },
+    "consensus": {
+        "title": "Konsensussjekk — hele tavlen",
+        "question": "Kan du stille deg bak forpliktelsestavlen? (1-5)",
+        "type": "rating",
+        "ratings": [],  # {user_id, value, comment}
+        "active": False,
+    },
+}
+
+
+def load_state():
+    if DATA_FILE.exists():
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Feil ved lasting: {e}")
+    return {
+        "session_started": datetime.now().isoformat(),
+        "active_round": None,
+        "participants": {},  # user_id -> name
+        "rounds": json.loads(json.dumps(DEFAULT_ROUNDS)),  # deep copy
+    }
+
+
+def save_state():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(STATE, f, ensure_ascii=False, indent=2)
+
+
+STATE = load_state()
+
+
+# ---------- WEBSOCKET CONNECTION MANAGER ----------
+
+class ConnectionManager:
+    def __init__(self):
+        self.connections: Set[WebSocket] = set()
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.connections.add(ws)
+
+    def disconnect(self, ws: WebSocket):
+        self.connections.discard(ws)
+
+    async def broadcast(self, message: dict):
+        dead = set()
+        for ws in self.connections:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.add(ws)
+        for ws in dead:
+            self.connections.discard(ws)
+
+
+manager = ConnectionManager()
+
+
+# ---------- ROUTES ----------
+
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "localhost"
+
+
+@app.get("/")
+async def root():
+    return HTMLResponse(LANDING_HTML.replace("{{IP}}", get_local_ip()))
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin():
+    return HTMLResponse(ADMIN_HTML)
+
+
+@app.get("/p", response_class=HTMLResponse)
+async def participant():
+    return HTMLResponse(PARTICIPANT_HTML)
+
+
+@app.get("/wall", response_class=HTMLResponse)
+async def wall():
+    return HTMLResponse(WALL_HTML)
+
+
+@app.get("/api/state")
+async def get_state():
+    return JSONResponse(STATE)
+
+
+@app.get("/api/export")
+async def export():
+    return JSONResponse(STATE, headers={"Content-Disposition": "attachment; filename=workshop_export.json"})
+
+
+@app.post("/api/round/{round_id}/activate")
+async def activate_round(round_id: str):
+    if round_id not in STATE["rounds"]:
+        return JSONResponse({"error": "ukjent runde"}, status_code=404)
+    for r in STATE["rounds"].values():
+        r["active"] = False
+    STATE["rounds"][round_id]["active"] = True
+    STATE["active_round"] = round_id
+    save_state()
+    await manager.broadcast({"type": "round_changed", "round_id": round_id, "state": STATE})
+    return {"ok": True}
+
+
+@app.post("/api/round/{round_id}/clear")
+async def clear_round(round_id: str):
+    if round_id not in STATE["rounds"]:
+        return JSONResponse({"error": "ukjent runde"}, status_code=404)
+    r = STATE["rounds"][round_id]
+    if "items" in r:
+        r["items"] = []
+    if "votes" in r:
+        r["votes"] = {}
+    if "ratings" in r:
+        r["ratings"] = []
+    if "consensus" in r:
+        r["consensus"] = []
+    save_state()
+    await manager.broadcast({"type": "round_cleared", "round_id": round_id, "state": STATE})
+    return {"ok": True}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await manager.connect(ws)
+    try:
+        # Send full state at connect
+        await ws.send_json({"type": "init", "state": STATE})
+        while True:
+            data = await ws.receive_json()
+            await handle_message(data, ws)
+    except WebSocketDisconnect:
+        manager.disconnect(ws)
+    except Exception as e:
+        print(f"WS error: {e}")
+        manager.disconnect(ws)
+
+
+async def handle_message(data: dict, ws: WebSocket):
+    msg_type = data.get("type")
+
+    if msg_type == "join":
+        user_id = data.get("user_id")
+        name = data.get("name", "")
+        if user_id:
+            STATE["participants"][user_id] = name
+            save_state()
+            await manager.broadcast({"type": "participants_updated", "participants": STATE["participants"]})
+
+    elif msg_type == "submit":
+        round_id = data.get("round_id")
+        if round_id not in STATE["rounds"]:
+            return
+        r = STATE["rounds"][round_id]
+        if r["type"] in ("freetext", "categorized"):
+            item = {
+                "id": f"{round_id}_{len(r['items'])}_{datetime.now().timestamp()}",
+                "user_id": data.get("user_id", "anon"),
+                "user_name": STATE["participants"].get(data.get("user_id", ""), "Anonym"),
+                "value": data.get("value", "").strip(),
+                "category": data.get("category"),  # for categorized
+                "cluster": None,
+                "ts": datetime.now().isoformat(),
+            }
+            if item["value"]:
+                r["items"].append(item)
+                save_state()
+                await manager.broadcast({"type": "item_added", "round_id": round_id, "item": item})
+
+    elif msg_type == "vote":
+        round_id = data.get("round_id")
+        if round_id not in STATE["rounds"]:
+            return
+        r = STATE["rounds"][round_id]
+        if r["type"] == "vote":
+            user_id = data.get("user_id", "anon")
+            r["votes"][user_id] = data.get("options", [])[:3]  # max 3 votes
+            save_state()
+            await manager.broadcast({"type": "vote_updated", "round_id": round_id, "votes": r["votes"]})
+
+    elif msg_type == "rate":
+        round_id = data.get("round_id")
+        if round_id not in STATE["rounds"]:
+            return
+        r = STATE["rounds"][round_id]
+        if r["type"] == "rating":
+            user_id = data.get("user_id", "anon")
+            value = int(data.get("value", 3))
+            comment = data.get("comment", "")
+            r["ratings"] = [x for x in r["ratings"] if x["user_id"] != user_id]
+            r["ratings"].append({
+                "user_id": user_id,
+                "user_name": STATE["participants"].get(user_id, "Anonym"),
+                "value": value,
+                "comment": comment,
+                "ts": datetime.now().isoformat(),
+            })
+            save_state()
+            await manager.broadcast({"type": "rating_updated", "round_id": round_id, "ratings": r["ratings"]})
+
+    elif msg_type == "delete_item":
+        round_id = data.get("round_id")
+        item_id = data.get("item_id")
+        if round_id in STATE["rounds"]:
+            r = STATE["rounds"][round_id]
+            if "items" in r:
+                r["items"] = [i for i in r["items"] if i["id"] != item_id]
+                save_state()
+                await manager.broadcast({"type": "item_removed", "round_id": round_id, "item_id": item_id})
+
+    elif msg_type == "cluster_item":
+        # Fasilitator grupperer en lapp
+        round_id = data.get("round_id")
+        item_id = data.get("item_id")
+        cluster = data.get("cluster")
+        if round_id in STATE["rounds"]:
+            for it in STATE["rounds"][round_id].get("items", []):
+                if it["id"] == item_id:
+                    it["cluster"] = cluster
+                    save_state()
+                    await manager.broadcast({"type": "state", "state": STATE})
+                    break
+
+    elif msg_type == "set_options":
+        # Fasilitator setter dot-voting opsjoner
+        round_id = data.get("round_id")
+        if round_id in STATE["rounds"]:
+            STATE["rounds"][round_id]["options"] = data.get("options", [])
+            save_state()
+            await manager.broadcast({"type": "state", "state": STATE})
+
+
+# ---------- HTML TEMPLATES ----------
+
+LANDING_HTML = """<!DOCTYPE html>
+<html lang="no"><head><meta charset="UTF-8"><title>Mestringstorget Workshop Server</title>
+<style>
+body{font-family:Inter,sans-serif;background:#1a1a2e;color:#fff;margin:0;padding:60px 40px;text-align:center}
+h1{font-size:42px;color:#00a896;margin-bottom:8px}
+p{color:#aaa;font-size:18px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;max-width:1100px;margin:50px auto}
+.card{background:#16213e;border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:30px;text-decoration:none;color:#fff;transition:transform .2s,border-color .2s}
+.card:hover{transform:translateY(-4px);border-color:#00a896}
+.card h2{color:#02c8a7;margin:0 0 10px;font-size:22px}
+.card p{margin:0;font-size:14px;color:#aaa}
+.ip{background:#0f3460;padding:20px;border-radius:12px;display:inline-block;margin-top:30px;font-family:monospace;font-size:18px}
+.ip strong{color:#02c8a7}
+</style></head><body>
+<h1>Mestringstorget Workshop Server</h1>
+<p>Live digital input for ledergruppen Helse og mestring</p>
+
+<div class="ip">Server: <strong>http://{{IP}}:8000</strong></div>
+
+<div class="cards">
+  <a class="card" href="/admin"><h2>&rarr; Fasilitator</h2><p>Styr runder, se alt, eksporter</p></a>
+  <a class="card" href="/wall"><h2>&rarr; Live Wall</h2><p>Vises pa storskjerm i workshopen</p></a>
+  <a class="card" href="/p"><h2>&rarr; Deltaker</h2><p>Test deltaker-input</p></a>
+</div>
+
+<div style="margin-top:40px">
+  <p style="font-size:14px">Deltakerne apner: <strong style="color:#02c8a7">http://{{IP}}:8000/p</strong></p>
+  <p style="font-size:14px">Live wall: <strong style="color:#02c8a7">http://{{IP}}:8000/wall</strong></p>
+</div>
+</body></html>"""
+
+
+PARTICIPANT_HTML = """<!DOCTYPE html>
+<html lang="no"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workshop — Mestringstorget</title>
+<style>
+:root { --teal:#00a896; --teal-l:#02c8a7; --dark:#1a1a2e; --blue:#16213e; --warm:#e8634a; --gold:#f5a623; --green:#22c55e; --purple:#7b61ff; }
+* { box-sizing: border-box; margin:0; padding:0; }
+body { font-family: 'Inter', -apple-system, sans-serif; background: linear-gradient(135deg,#1a1a2e 0%,#16213e 100%); color:#fff; min-height:100vh; padding:20px; }
+.container { max-width: 720px; margin: 0 auto; }
+.header { text-align:center; margin-bottom:24px; }
+.header h1 { font-size:24px; color:var(--teal-l); }
+.header .status { font-size:12px; color:#888; margin-top:6px; }
+.status .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#22c55e; margin-right:6px; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+.name-input { background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.15); border-radius:12px; padding:14px 18px; color:#fff; font-size:16px; width:100%; margin-bottom:20px; }
+.card { background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.1); border-radius:18px; padding:24px; margin-bottom:18px; }
+.card.active { border-color:var(--teal); box-shadow: 0 0 30px rgba(0,168,150,.2); }
+.label { font-size:11px; color:var(--teal); letter-spacing:2px; text-transform:uppercase; font-weight:700; }
+.title { font-size:22px; font-weight:800; margin-top:8px; }
+.question { font-size:17px; color:#ccc; margin-top:14px; line-height:1.5; }
+.input-area { margin-top:20px; }
+textarea { width:100%; background:rgba(0,0,0,.3); border:1px solid rgba(255,255,255,.15); border-radius:12px; padding:14px 16px; color:#fff; font-size:16px; resize:vertical; min-height:80px; font-family:inherit; }
+textarea:focus { outline:none; border-color:var(--teal); }
+button { background:var(--teal); color:#fff; border:none; border-radius:12px; padding:14px 28px; font-size:16px; font-weight:700; cursor:pointer; width:100%; margin-top:12px; transition: background .2s, transform .1s; }
+button:hover { background:var(--teal-l); }
+button:active { transform: scale(.97); }
+button:disabled { opacity:.5; cursor:not-allowed; }
+.cat-buttons { display:flex; gap:8px; margin:12px 0; }
+.cat-buttons button { flex:1; margin:0; padding:10px; font-size:13px; }
+.cat-Behold { background:var(--green); }
+.cat-Endre { background:var(--gold); }
+.cat-Slipp { background:#ef4444; }
+.my-items { margin-top:16px; }
+.my-item { background:rgba(0,0,0,.25); border-left:3px solid var(--teal); padding:10px 14px; margin-bottom:8px; border-radius:8px; font-size:14px; display:flex; justify-content:space-between; align-items:center; }
+.my-item button { width:auto; padding:4px 10px; margin:0; font-size:12px; background:#444; }
+.my-item button:hover { background:#ef4444; }
+.empty { text-align:center; padding:60px 20px; color:#666; font-size:16px; }
+.vote-options { display:flex; flex-direction:column; gap:8px; margin-top:16px; }
+.vote-option { background:rgba(0,0,0,.3); border:2px solid rgba(255,255,255,.1); border-radius:10px; padding:14px; cursor:pointer; transition: all .2s; }
+.vote-option.selected { border-color:var(--teal); background:rgba(0,168,150,.2); }
+.vote-option .badge { float:right; background:var(--teal); color:#fff; border-radius:999px; padding:2px 10px; font-size:12px; font-weight:700; }
+.vote-status { text-align:center; color:#aaa; font-size:14px; margin-top:8px; }
+.rating-row { display:flex; justify-content:space-between; gap:6px; margin:14px 0; }
+.rating-btn { flex:1; padding:18px 0; border-radius:12px; border:2px solid rgba(255,255,255,.15); background:rgba(0,0,0,.3); color:#fff; font-size:24px; font-weight:800; cursor:pointer; transition: all .2s; }
+.rating-btn:hover { border-color:var(--teal); }
+.rating-btn.selected { background:var(--teal); border-color:var(--teal-l); transform: scale(1.1); }
+.rating-labels { display:flex; justify-content:space-between; font-size:11px; color:#888; }
+</style></head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Mestringstorget Workshop</h1>
+    <div class="status"><span class="dot"></span><span id="status">Kobler til...</span></div>
+  </div>
+
+  <input class="name-input" id="name" placeholder="Ditt navn (valgfritt)" />
+
+  <div id="content">
+    <div class="card empty">Venter pa fasilitator a starte en runde...</div>
+  </div>
+</div>
+
+<script>
+const userId = localStorage.getItem('uid') || 'u_' + Math.random().toString(36).slice(2,10);
+localStorage.setItem('uid', userId);
+const nameInput = document.getElementById('name');
+nameInput.value = localStorage.getItem('name') || '';
+nameInput.addEventListener('change', () => {
+  localStorage.setItem('name', nameInput.value);
+  ws.send(JSON.stringify({type:'join', user_id:userId, name:nameInput.value}));
+});
+
+let state = null;
+let ws = null;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => {
+    document.getElementById('status').textContent = 'Tilkoblet';
+    ws.send(JSON.stringify({type:'join', user_id:userId, name:nameInput.value}));
+  };
+  ws.onclose = () => {
+    document.getElementById('status').textContent = 'Frakoblet — kobler til igjen...';
+    setTimeout(connect, 1500);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'init' || msg.state) state = msg.state;
+    else if (msg.type === 'round_changed') state = msg.state;
+    else if (msg.type === 'item_added') {
+      if (state) state.rounds[msg.round_id].items.push(msg.item);
+    } else if (msg.type === 'item_removed') {
+      if (state) state.rounds[msg.round_id].items = state.rounds[msg.round_id].items.filter(i => i.id !== msg.item_id);
+    } else if (msg.type === 'vote_updated') {
+      if (state) state.rounds[msg.round_id].votes = msg.votes;
+    }
+    render();
+  };
+}
+
+function activeRound() {
+  if (!state || !state.active_round) return null;
+  return [state.active_round, state.rounds[state.active_round]];
+}
+
+function myItems(roundId) {
+  if (!state) return [];
+  const r = state.rounds[roundId];
+  return (r.items || []).filter(i => i.user_id === userId);
+}
+
+function submitItem(roundId, value, category=null) {
+  ws.send(JSON.stringify({type:'submit', round_id:roundId, user_id:userId, value, category}));
+}
+
+function deleteItem(roundId, itemId) {
+  ws.send(JSON.stringify({type:'delete_item', round_id:roundId, item_id:itemId}));
+}
+
+function vote(roundId, optionId) {
+  const r = state.rounds[roundId];
+  let mine = (r.votes && r.votes[userId]) || [];
+  if (mine.includes(optionId)) {
+    mine = mine.filter(o => o !== optionId);
+  } else if (mine.length < 3) {
+    mine = [...mine, optionId];
+  }
+  ws.send(JSON.stringify({type:'vote', round_id:roundId, user_id:userId, options:mine}));
+}
+
+function rate(roundId, value) {
+  const comment = document.getElementById('rate-comment')?.value || '';
+  ws.send(JSON.stringify({type:'rate', round_id:roundId, user_id:userId, value, comment}));
+}
+
+function render() {
+  const content = document.getElementById('content');
+  const ar = activeRound();
+  if (!ar) {
+    content.innerHTML = '<div class="card empty">Venter pa fasilitator a starte en runde...</div>';
+    return;
+  }
+  const [rid, r] = ar;
+
+  if (r.type === 'freetext') {
+    const mine = myItems(rid);
+    content.innerHTML = `
+      <div class="card active">
+        <div class="label">Aktiv runde</div>
+        <div class="title">${r.title}</div>
+        <div class="question">${r.question}</div>
+        <div class="input-area">
+          <textarea id="ta" placeholder="Skriv din lapp her..."></textarea>
+          <button onclick="sendOne()">Send inn lapp</button>
+        </div>
+        <div class="my-items">
+          <div style="font-size:12px;color:#888;margin:14px 0 6px;letter-spacing:1px">DINE LAPPER (${mine.length})</div>
+          ${mine.map(i => `<div class="my-item"><span>${escape(i.value)}</span><button onclick="deleteItem('${rid}','${i.id}')">Slett</button></div>`).join('')}
+          ${mine.length === 0 ? '<div style="font-size:13px;color:#666;text-align:center;padding:14px">Ingen lapper enna</div>' : ''}
+        </div>
+      </div>`;
+  } else if (r.type === 'categorized') {
+    const mine = myItems(rid);
+    content.innerHTML = `
+      <div class="card active">
+        <div class="label">Aktiv runde</div>
+        <div class="title">${r.title}</div>
+        <div class="question">${r.question}</div>
+        <div class="input-area">
+          <textarea id="ta" placeholder="Skriv din lapp her..."></textarea>
+          <div class="cat-buttons">
+            ${r.categories.map(c => `<button class="cat-${c}" onclick="sendCat('${c}')">${c}</button>`).join('')}
+          </div>
+        </div>
+        <div class="my-items">
+          ${mine.map(i => `<div class="my-item"><span><strong style="color:var(--teal-l)">[${i.category}]</strong> ${escape(i.value)}</span><button onclick="deleteItem('${rid}','${i.id}')">Slett</button></div>`).join('')}
+        </div>
+      </div>`;
+  } else if (r.type === 'vote') {
+    const mine = (r.votes && r.votes[userId]) || [];
+    content.innerHTML = `
+      <div class="card active">
+        <div class="label">Aktiv runde — Stem maks 3</div>
+        <div class="title">${r.title}</div>
+        <div class="question">${r.question}</div>
+        <div class="vote-options">
+          ${(r.options || []).map(opt => `
+            <div class="vote-option ${mine.includes(opt.id) ? 'selected' : ''}" onclick="vote('${rid}','${opt.id}')">
+              ${escape(opt.text)}
+              ${mine.includes(opt.id) ? '<span class="badge">+1</span>' : ''}
+            </div>
+          `).join('')}
+        </div>
+        <div class="vote-status">${mine.length} av 3 stemmer brukt</div>
+      </div>`;
+  } else if (r.type === 'rating') {
+    const myRating = (r.ratings || []).find(x => x.user_id === userId);
+    const sel = myRating ? myRating.value : 0;
+    content.innerHTML = `
+      <div class="card active">
+        <div class="label">Aktiv runde — Konsensussjekk</div>
+        <div class="title">${r.title}</div>
+        <div class="question">${r.question}</div>
+        <div class="rating-row">
+          ${[1,2,3,4,5].map(v => `<button class="rating-btn ${sel === v ? 'selected' : ''}" onclick="rate('${rid}',${v})">${v}</button>`).join('')}
+        </div>
+        <div class="rating-labels">
+          <span>Kan ikke leve</span><span></span><span>Kan leve med</span><span></span><span>Helt enig</span>
+        </div>
+        <textarea id="rate-comment" placeholder="Eventuell kommentar..." style="margin-top:14px"></textarea>
+      </div>`;
+  }
+}
+
+function sendOne() {
+  const ar = activeRound();
+  if (!ar) return;
+  const ta = document.getElementById('ta');
+  const v = ta.value.trim();
+  if (!v) return;
+  submitItem(ar[0], v);
+  ta.value = '';
+}
+
+function sendCat(cat) {
+  const ar = activeRound();
+  if (!ar) return;
+  const ta = document.getElementById('ta');
+  const v = ta.value.trim();
+  if (!v) return;
+  submitItem(ar[0], v, cat);
+  ta.value = '';
+}
+
+function escape(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+connect();
+</script>
+</body></html>"""
+
+
+WALL_HTML = """<!DOCTYPE html>
+<html lang="no"><head><meta charset="UTF-8"><title>Live Wall — Mestringstorget</title>
+<style>
+:root { --teal:#00a896; --teal-l:#02c8a7; --dark:#1a1a2e; --blue:#16213e; --warm:#e8634a; --gold:#f5a623; --green:#22c55e; --purple:#7b61ff; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font-family: 'Inter', -apple-system, sans-serif; background: linear-gradient(135deg,#1a1a2e 0%,#16213e 100%); color:#fff; min-height:100vh; padding:32px 40px; overflow-x:hidden; }
+.header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:30px; }
+.header .label { font-size:13px; color:var(--teal); letter-spacing:3px; text-transform:uppercase; font-weight:700; }
+.header h1 { font-size:38px; margin-top:6px; }
+.header .question { font-size:18px; color:#ccc; margin-top:4px; max-width:900px; }
+.stats { text-align:right; }
+.stats .num { font-size:48px; color:var(--teal-l); font-weight:800; line-height:1; }
+.stats .label { font-size:13px; color:#888; }
+.wall { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:18px; }
+.note { background:linear-gradient(135deg,#fef3c7,#fde68a); color:#1f2937; padding:18px 20px; border-radius:8px; box-shadow:0 6px 16px rgba(0,0,0,.3); transform:rotate(0deg); animation:noteIn .5s cubic-bezier(.2,.9,.3,1.4); position:relative; min-height:90px; }
+.note:nth-child(3n+1) { transform:rotate(-1deg); background:linear-gradient(135deg,#fef3c7,#fde68a); }
+.note:nth-child(3n+2) { transform:rotate(1deg); background:linear-gradient(135deg,#dbeafe,#bfdbfe); }
+.note:nth-child(3n) { transform:rotate(-0.5deg); background:linear-gradient(135deg,#dcfce7,#bbf7d0); }
+.note .text { font-size:15px; line-height:1.4; font-weight:500; }
+.note .author { font-size:11px; color:#6b7280; margin-top:10px; font-style:italic; }
+.note.cat-Behold { background:linear-gradient(135deg,#dcfce7,#bbf7d0); }
+.note.cat-Endre { background:linear-gradient(135deg,#fef3c7,#fde68a); }
+.note.cat-Slipp { background:linear-gradient(135deg,#fee2e2,#fecaca); }
+.note .cat-tag { position:absolute; top:8px; right:8px; font-size:9px; font-weight:800; letter-spacing:1px; padding:3px 8px; border-radius:4px; background:#1f2937; color:#fff; }
+@keyframes noteIn { from { opacity:0; transform: translateY(20px) rotate(0deg) scale(.9); } to { opacity:1; transform: rotate(var(--rot,0deg)) scale(1); } }
+.empty { text-align:center; padding:120px 20px; color:#444; font-size:24px; }
+.empty span { display:block; font-size:60px; margin-bottom:20px; color:#222; }
+.cat-section { margin-bottom:30px; }
+.cat-section h2 { font-size:20px; margin-bottom:14px; padding-bottom:10px; border-bottom:2px solid; }
+.cat-section.Behold h2 { color:var(--green); border-color:var(--green); }
+.cat-section.Endre h2 { color:var(--gold); border-color:var(--gold); }
+.cat-section.Slipp h2 { color:#ef4444; border-color:#ef4444; }
+.vote-list { display:flex; flex-direction:column; gap:10px; max-width:900px; }
+.vote-row { background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.1); border-radius:10px; padding:14px 18px; display:flex; justify-content:space-between; align-items:center; transition:background .3s; }
+.vote-row .text { font-size:18px; }
+.vote-row .bar-container { width:300px; height:24px; background:rgba(0,0,0,.3); border-radius:6px; margin-left:14px; position:relative; overflow:hidden; }
+.vote-row .bar { height:100%; background:linear-gradient(90deg,var(--teal),var(--teal-l)); transition: width .5s ease; border-radius:6px; }
+.vote-row .num { position:absolute; right:10px; top:50%; transform:translateY(-50%); font-weight:800; font-size:14px; color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.5); }
+.rating-board { display:grid; grid-template-columns:repeat(5,1fr); gap:18px; margin-top:24px; }
+.rating-col { background:rgba(255,255,255,.05); border-radius:14px; padding:24px; text-align:center; border:1px solid rgba(255,255,255,.1); }
+.rating-col .num { font-size:60px; font-weight:800; line-height:1; }
+.rating-col .label { font-size:12px; color:#888; margin-top:8px; }
+.rating-col .count { font-size:36px; color:#fff; margin-top:14px; font-weight:700; }
+.rating-col.r1 .num { color:#ef4444; }
+.rating-col.r2 .num { color:#f59e0b; }
+.rating-col.r3 .num { color:#9ca3af; }
+.rating-col.r4 .num { color:var(--teal-l); }
+.rating-col.r5 .num { color:var(--green); }
+.consensus-summary { background:rgba(0,168,150,.06); border:1px solid rgba(0,168,150,.3); border-radius:14px; padding:22px; margin-top:24px; text-align:center; }
+.consensus-summary .big { font-size:42px; font-weight:800; color:var(--teal-l); }
+</style></head>
+<body>
+<div class="header">
+  <div>
+    <div class="label" id="round-label">Venter</div>
+    <h1 id="round-title">Live Wall</h1>
+    <div class="question" id="round-question">Apne /admin og start en runde</div>
+  </div>
+  <div class="stats">
+    <div class="num" id="count">0</div>
+    <div class="label" id="count-label">lapper</div>
+  </div>
+</div>
+
+<div id="wall"><div class="empty"><span>&#9202;</span>Venter pa input...</div></div>
+
+<script>
+let state = null;
+let ws = null;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => console.log('connected');
+  ws.onclose = () => setTimeout(connect, 1500);
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.state) state = msg.state;
+    else if (msg.type === 'item_added') {
+      if (state) state.rounds[msg.round_id].items.push(msg.item);
+    } else if (msg.type === 'item_removed') {
+      if (state) state.rounds[msg.round_id].items = state.rounds[msg.round_id].items.filter(i => i.id !== msg.item_id);
+    } else if (msg.type === 'vote_updated') {
+      if (state) state.rounds[msg.round_id].votes = msg.votes;
+    } else if (msg.type === 'rating_updated') {
+      if (state) state.rounds[msg.round_id].ratings = msg.ratings;
+    }
+    render();
+  };
+}
+
+function render() {
+  if (!state || !state.active_round) {
+    document.getElementById('round-label').textContent = 'Venter';
+    document.getElementById('round-title').textContent = 'Live Wall';
+    document.getElementById('round-question').textContent = 'Apne /admin og start en runde';
+    document.getElementById('wall').innerHTML = '<div class="empty"><span>&#9202;</span>Venter pa input...</div>';
+    document.getElementById('count').textContent = '0';
+    return;
+  }
+  const rid = state.active_round;
+  const r = state.rounds[rid];
+  document.getElementById('round-label').textContent = 'Aktiv runde';
+  document.getElementById('round-title').textContent = r.title;
+  document.getElementById('round-question').textContent = r.question;
+
+  const wall = document.getElementById('wall');
+
+  if (r.type === 'freetext') {
+    const items = r.items || [];
+    document.getElementById('count').textContent = items.length;
+    document.getElementById('count-label').textContent = items.length === 1 ? 'lapp' : 'lapper';
+    if (items.length === 0) {
+      wall.innerHTML = '<div class="empty"><span>&#9203;</span>Ingen lapper enna...</div>';
+    } else {
+      wall.className = 'wall';
+      wall.innerHTML = items.map(i => `
+        <div class="note">
+          <div class="text">${escape(i.value)}</div>
+          <div class="author">${escape(i.user_name || 'Anonym')}</div>
+        </div>
+      `).join('');
+    }
+  } else if (r.type === 'categorized') {
+    const items = r.items || [];
+    document.getElementById('count').textContent = items.length;
+    document.getElementById('count-label').textContent = 'lapper';
+    wall.className = '';
+    wall.innerHTML = r.categories.map(cat => {
+      const catItems = items.filter(i => i.category === cat);
+      return `
+        <div class="cat-section ${cat}">
+          <h2>${cat} (${catItems.length})</h2>
+          <div class="wall">
+            ${catItems.map(i => `<div class="note cat-${cat}"><span class="cat-tag">${cat}</span><div class="text">${escape(i.value)}</div><div class="author">${escape(i.user_name)}</div></div>`).join('')}
+          </div>
+        </div>`;
+    }).join('');
+  } else if (r.type === 'vote') {
+    const totalVotes = Object.values(r.votes || {}).reduce((s, arr) => s + arr.length, 0);
+    document.getElementById('count').textContent = totalVotes;
+    document.getElementById('count-label').textContent = 'stemmer';
+    const counts = {};
+    (r.options || []).forEach(o => counts[o.id] = 0);
+    Object.values(r.votes || {}).forEach(arr => arr.forEach(oid => { if (counts[oid] !== undefined) counts[oid]++; }));
+    const max = Math.max(1, ...Object.values(counts));
+    const sorted = (r.options || []).slice().sort((a, b) => counts[b.id] - counts[a.id]);
+    wall.className = '';
+    wall.innerHTML = `<div class="vote-list">${sorted.map(opt => `
+      <div class="vote-row">
+        <span class="text">${escape(opt.text)}</span>
+        <div class="bar-container"><div class="bar" style="width:${(counts[opt.id]/max)*100}%"></div><div class="num">${counts[opt.id]}</div></div>
+      </div>
+    `).join('')}</div>`;
+  } else if (r.type === 'rating') {
+    const ratings = r.ratings || [];
+    document.getElementById('count').textContent = ratings.length;
+    document.getElementById('count-label').textContent = 'stemmer';
+    const buckets = [0,0,0,0,0,0]; // index 1-5
+    ratings.forEach(rt => buckets[rt.value]++);
+    const avg = ratings.length ? (ratings.reduce((s,r) => s+r.value, 0) / ratings.length).toFixed(1) : '—';
+    wall.className = '';
+    wall.innerHTML = `
+      <div class="rating-board">
+        ${[1,2,3,4,5].map(v => `<div class="rating-col r${v}"><div class="num">${v}</div><div class="label">${['Kan ikke leve','Sterke innvendinger','Kan leve med','God lasning','Helt enig'][v-1]}</div><div class="count">${buckets[v]}</div></div>`).join('')}
+      </div>
+      <div class="consensus-summary">
+        Snitt: <span class="big">${avg}</span><br>
+        ${ratings.length} av ${Object.keys(state.participants).length} har stemt
+        ${ratings.filter(rt => rt.value < 3).length > 0 ? `<div style="color:#ef4444;margin-top:10px">${ratings.filter(rt => rt.value < 3).length} har sterke innvendinger</div>` : ''}
+      </div>`;
+  }
+}
+
+function escape(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+connect();
+</script>
+</body></html>"""
+
+
+ADMIN_HTML = """<!DOCTYPE html>
+<html lang="no"><head><meta charset="UTF-8"><title>Admin — Mestringstorget Workshop</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; font-family: 'Inter', -apple-system, sans-serif; }
+body { background:#1a1a2e; color:#fff; padding:30px; min-height:100vh; }
+.container { max-width:1400px; margin:0 auto; }
+h1 { color:#02c8a7; margin-bottom:8px; }
+.meta { color:#888; margin-bottom:30px; font-size:14px; }
+.rounds { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin-bottom:30px; }
+.round { background:#16213e; border:1px solid rgba(255,255,255,.1); border-radius:14px; padding:20px; }
+.round.active { border-color:#00a896; box-shadow:0 0 30px rgba(0,168,150,.2); }
+.round h3 { font-size:15px; color:#02c8a7; margin-bottom:8px; }
+.round .desc { font-size:12px; color:#888; margin-bottom:14px; min-height:30px; }
+.round .count { font-size:24px; color:#fff; font-weight:800; margin-bottom:10px; }
+.round button { width:100%; padding:10px; border:none; border-radius:8px; background:#0f3460; color:#fff; cursor:pointer; font-weight:700; margin-top:6px; }
+.round button:hover { background:#00a896; }
+.round button.active { background:#00a896; }
+.round button.danger { background:#3a1a1a; }
+.round button.danger:hover { background:#ef4444; }
+.live { background:#16213e; border-radius:14px; padding:24px; }
+.live h2 { color:#02c8a7; margin-bottom:14px; }
+.items-list { max-height:400px; overflow-y:auto; padding-right:10px; }
+.item { background:rgba(255,255,255,.05); border-left:3px solid #00a896; padding:10px 14px; margin-bottom:8px; border-radius:6px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
+.item .v { flex:1; font-size:14px; }
+.item .u { font-size:11px; color:#888; }
+.item button { background:#3a1a1a; color:#fff; border:none; border-radius:6px; padding:5px 10px; cursor:pointer; font-size:11px; }
+.item button:hover { background:#ef4444; }
+.actions { margin-top:20px; display:flex; gap:10px; flex-wrap:wrap; }
+.actions a, .actions button { background:#0f3460; color:#fff; padding:10px 18px; border-radius:8px; text-decoration:none; border:none; cursor:pointer; font-weight:700; }
+.actions a:hover, .actions button:hover { background:#00a896; }
+.options-editor { margin-top:14px; background:rgba(0,0,0,.3); padding:14px; border-radius:8px; }
+.options-editor textarea { width:100%; min-height:120px; background:rgba(0,0,0,.4); color:#fff; border:1px solid rgba(255,255,255,.15); border-radius:6px; padding:10px; font-family:inherit; font-size:13px; }
+.options-editor button { background:#00a896; color:#fff; border:none; padding:8px 16px; border-radius:6px; margin-top:8px; cursor:pointer; }
+.participants { background:#16213e; border-radius:14px; padding:18px; margin-bottom:24px; }
+.participants h2 { color:#02c8a7; font-size:15px; margin-bottom:10px; }
+.participants .chips { display:flex; flex-wrap:wrap; gap:8px; }
+.participants .chip { background:rgba(0,168,150,.15); border:1px solid rgba(0,168,150,.3); border-radius:999px; padding:5px 12px; font-size:12px; }
+</style></head>
+<body>
+<div class="container">
+  <h1>Admin — Mestringstorget Workshop</h1>
+  <div class="meta">Aktiv runde styrer hva deltakerne ser. Klikk pa en runde for a aktivere den.</div>
+
+  <div class="participants">
+    <h2 id="part-title">Deltakere (0)</h2>
+    <div class="chips" id="part-chips"></div>
+  </div>
+
+  <div class="rounds" id="rounds"></div>
+
+  <div class="live" id="live">
+    <h2>Velg en aktiv runde for a se input live</h2>
+  </div>
+
+  <div class="actions" style="margin-top:30px">
+    <a href="/wall" target="_blank">Apne Live Wall (storskjerm)</a>
+    <a href="/p" target="_blank">Test deltaker-side</a>
+    <a href="/api/export" download>Last ned full eksport (JSON)</a>
+  </div>
+</div>
+
+<script>
+let state = null;
+let ws = null;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onclose = () => setTimeout(connect, 1500);
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.state) state = msg.state;
+    else if (msg.type === 'item_added' && state) state.rounds[msg.round_id].items.push(msg.item);
+    else if (msg.type === 'item_removed' && state) state.rounds[msg.round_id].items = state.rounds[msg.round_id].items.filter(i => i.id !== msg.item_id);
+    else if (msg.type === 'vote_updated' && state) state.rounds[msg.round_id].votes = msg.votes;
+    else if (msg.type === 'rating_updated' && state) state.rounds[msg.round_id].ratings = msg.ratings;
+    else if (msg.type === 'participants_updated') { if (state) state.participants = msg.participants; }
+    render();
+  };
+}
+
+async function activate(rid) {
+  await fetch(`/api/round/${rid}/activate`, {method:'POST'});
+}
+
+async function clearRound(rid) {
+  if (!confirm('Slett alle lapper i denne runden?')) return;
+  await fetch(`/api/round/${rid}/clear`, {method:'POST'});
+}
+
+function deleteItem(rid, itemId) {
+  ws.send(JSON.stringify({type:'delete_item', round_id:rid, item_id:itemId}));
+}
+
+function setOptions(rid) {
+  const ta = document.getElementById('opts-ta');
+  const lines = ta.value.split('\\n').map(s => s.trim()).filter(Boolean);
+  const opts = lines.map((text, i) => ({id: 'o'+i, text}));
+  ws.send(JSON.stringify({type:'set_options', round_id:rid, options:opts}));
+}
+
+function render() {
+  if (!state) return;
+  // Participants
+  const parts = Object.entries(state.participants);
+  document.getElementById('part-title').textContent = `Deltakere (${parts.length})`;
+  document.getElementById('part-chips').innerHTML = parts.map(([id, name]) => `<div class="chip">${escape(name || 'Anonym')}</div>`).join('');
+
+  // Rounds grid
+  const rounds = document.getElementById('rounds');
+  rounds.innerHTML = Object.entries(state.rounds).map(([rid, r]) => {
+    let count = 0;
+    if (r.type === 'freetext' || r.type === 'categorized') count = (r.items || []).length;
+    else if (r.type === 'vote') count = Object.values(r.votes || {}).reduce((s, arr) => s + arr.length, 0);
+    else if (r.type === 'rating') count = (r.ratings || []).length;
+    return `
+      <div class="round ${r.active ? 'active' : ''}">
+        <h3>${escape(r.title)}</h3>
+        <div class="desc">${escape((r.question || '').slice(0, 80))}</div>
+        <div class="count">${count}</div>
+        <button class="${r.active ? 'active' : ''}" onclick="activate('${rid}')">${r.active ? '✓ AKTIV' : 'Aktiver'}</button>
+        <button class="danger" onclick="clearRound('${rid}')">Tom</button>
+      </div>`;
+  }).join('');
+
+  // Live view of active round
+  const live = document.getElementById('live');
+  if (!state.active_round) {
+    live.innerHTML = '<h2>Velg en aktiv runde</h2>';
+    return;
+  }
+  const r = state.rounds[state.active_round];
+  let html = `<h2>${escape(r.title)} — Live</h2>`;
+  if (r.type === 'freetext' || r.type === 'categorized') {
+    const items = r.items || [];
+    html += `<div class="items-list">${items.map(i => `
+      <div class="item">
+        <div class="v">${i.category ? `<strong style="color:#02c8a7">[${i.category}]</strong> ` : ''}${escape(i.value)}</div>
+        <div class="u">${escape(i.user_name || '')}</div>
+        <button onclick="deleteItem('${state.active_round}','${i.id}')">slett</button>
+      </div>`).join('') || '<div style="color:#888;text-align:center;padding:30px">Ingen lapper enna</div>'}</div>`;
+  } else if (r.type === 'vote') {
+    html += `<div class="options-editor">
+      <div style="margin-bottom:10px;font-size:13px;color:#888">Skriv en valgmulighet per linje:</div>
+      <textarea id="opts-ta">${(r.options || []).map(o => o.text).join('\\n')}</textarea>
+      <button onclick="setOptions('${state.active_round}')">Oppdater valg</button>
+    </div>`;
+    const counts = {};
+    (r.options || []).forEach(o => counts[o.id] = 0);
+    Object.values(r.votes || {}).forEach(arr => arr.forEach(oid => { if (counts[oid] !== undefined) counts[oid]++; }));
+    html += '<div style="margin-top:14px">' + (r.options || []).map(o => `<div class="item"><div class="v">${escape(o.text)}</div><div class="u" style="color:#02c8a7;font-weight:800;font-size:14px">${counts[o.id]}</div></div>`).join('') + '</div>';
+  } else if (r.type === 'rating') {
+    const ratings = r.ratings || [];
+    const avg = ratings.length ? (ratings.reduce((s, x) => s + x.value, 0) / ratings.length).toFixed(2) : '-';
+    html += `<div style="font-size:32px;color:#02c8a7;font-weight:800">Snitt: ${avg}</div>`;
+    html += '<div class="items-list" style="margin-top:14px">' + ratings.map(rt => `<div class="item"><div class="v"><strong>${rt.value}</strong> ${escape(rt.comment || '')}</div><div class="u">${escape(rt.user_name)}</div></div>`).join('') + '</div>';
+  }
+  live.innerHTML = html;
+}
+
+function escape(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+connect();
+</script>
+</body></html>"""
+
+
+# ---------- MAIN ----------
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    ip = get_local_ip()
+    print()
+    print("=" * 60)
+    print("MESTRINGSTORGET WORKSHOP SERVER")
+    print("=" * 60)
+    print(f"  Lokal IP:    {ip}")
+    print(f"  Port:        {port}")
+    print()
+    print(f"  Fasilitator: http://{ip}:{port}/admin")
+    print(f"  Live Wall:   http://{ip}:{port}/wall")
+    print(f"  Deltakere:   http://{ip}:{port}/p")
+    print()
+    print(f"  Data lagres: {DATA_FILE}")
+    print("=" * 60)
+    print()
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

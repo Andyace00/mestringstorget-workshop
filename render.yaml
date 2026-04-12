@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: mestringstorget-workshop
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python workshop_server.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"

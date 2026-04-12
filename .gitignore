@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+workshop_data.json
+.env
+.venv/
+.DS_Store
