@@ -99,14 +99,8 @@ DEFAULT_ROUNDS = {
         "items": [],
         "active": False,
     },
-    "behold": {
-        "title": "Behold / Endre / Slipp",
-        "question": "Sorter funnene i tre kategorier",
-        "type": "categorized",
-        "categories": ["Behold", "Endre", "Slipp"],
-        "items": [],
-        "active": False,
-    },
+    # behold-runden (Behold/Endre/Slipp) fjernet 2026-04-12:
+    # Slide 6 produserer "unngå"-lapper — alt ville havnet i Slipp. Logisk inkonsistent.
     "journey": {
         "title": "Karis nye reise",
         "question": "Design Karis komplette reise gjennom mestringstorget. Hva skjer steg for steg fra hun tar kontakt til hun mestrer hverdagen?",
@@ -419,12 +413,20 @@ def build_dotvote_prompt(raw_journey: List[str], raw_mok: List[str], min_n: int 
             f"Viktige regler:\n" + "\n".join(f"- {s}" for s in instr.get('viktige_regler', []))
         )
 
-    # INPUT
+    # INPUT — JOURNEY er hovedkilden. mok er VARSEL-kontekst (negative constraints).
     parts.append(
-        f"# INNSPILL FRA DELTAKERNE\n\n"
-        f"## Karis nye reise (slide 10) — alle steg deltakerne har designet:\n"
-        + ("\n".join(f"- {s}" for s in raw_journey) if raw_journey else "(ingen)") + "\n\n"
-        f"## Hva tar vi med oss (slide 6) — det de var opptatt av at vi unngår:\n"
+        f"# HOVEDINPUT — Karis nye reise (slide 10)\n"
+        f"Dette er DESIGN-forslag deltakerne har laget. Alternativene du returnerer skal komme HERFRA — "
+        f"det er konkrete retninger deltakerne allerede har formulert:\n"
+        + ("\n".join(f"- {s}" for s in raw_journey) if raw_journey else "(ingen)")
+    )
+
+    parts.append(
+        f"# VARSEL-KONTEKST — Hva deltakerne vil unngå (slide 6)\n"
+        f"Dette er IKKE forslag til alternativer. Dette er ting deltakerne er BEKYMRET for. "
+        f"Bruk listen som sjekkpunkt: alternativene dine MÅ IKKE bryte med disse bekymringene. "
+        f"Hvis et alternativ fra reisen ville forsterket en av disse bekymringene, velg et annet alternativ "
+        f"som fanger samme retning uten å aktivere bekymringen.\n"
         + ("\n".join(f"- {s}" for s in raw_mok) if raw_mok else "(ingen)")
     )
 
