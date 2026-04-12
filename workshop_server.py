@@ -40,12 +40,23 @@ from typing import Dict, List, Set
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 BASE_DIR = Path(__file__).parent
 DATA_FILE = BASE_DIR / "workshop_data.json"
 
 app = FastAPI(title="Mestringstorget Workshop Server")
+
+# CORS — tillat alle origins (inkl. file:// som kommer som "null") slik at
+# presentasjonen kan kalle API-et fra hvor som helst
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,  # MA vaere False for at allow_origins=["*"] skal funke
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Mount static files only if they exist (de finnes lokalt, ikke i sky-deploy)
 SCENE_IMAGES_DIR = BASE_DIR / "scene_images"
