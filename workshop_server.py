@@ -56,6 +56,21 @@ if GEMINI_KEY:
 
 BASE_DIR = Path(__file__).parent
 DATA_FILE = BASE_DIR / "workshop_data.json"
+CONTEXT_FILE = BASE_DIR / "workshop_context.json"
+
+
+def load_context():
+    """Last workshop-kontekst (brukes av AI-deduplisering for treffsikre prompts)."""
+    if CONTEXT_FILE.exists():
+        try:
+            with open(CONTEXT_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Kunne ikke laste workshop_context.json: {e}")
+    return {}
+
+
+WORKSHOP_CONTEXT = load_context()
 
 app = FastAPI(title="Mestringstorget Workshop Server")
 
@@ -292,21 +307,101 @@ def collect_round_items_text(round_id: str) -> List[str]:
     return [(it.get("value") or "").strip() for it in r.get("items", []) if (it.get("value") or "").strip()]
 
 
-def gemini_dedupe_options(raw: List[str], min_n: int = 6, max_n: int = 8) -> List[str]:
-    """Send rå tekst-liste til Gemini, få tilbake 6-8 unike, godt formulerte forslag."""
-    if not gemini_client or not raw:
-        return []
+def build_dotvote_prompt(raw_journey: List[str], raw_mok: List[str], min_n: int = 6, max_n: int = 8) -> str:
+    """Bygg en rik, kontekstualisert prompt for dot-voting basert på workshop_context.json."""
+    ctx = WORKSHOP_CONTEXT
+    parts = []
+
+    # ROLLE
+    rolle = ctx.get("prompt_instruksjoner_for_dotvote", {}).get("rolle", "")
+    if rolle:
+        parts.append(f"# ROLLE\n{rolle}")
+
+    # DOMENE
+    dom = ctx.get("domene", {})
+    if dom:
+        parts.append(
+            f"# DOMENE — {dom.get('navn', 'Mestringstorget')}\n"
+            f"Kilde: {dom.get('kilde', '')}\n\n"
+            f"Definisjon: {dom.get('definisjon', '')}\n\n"
+            f"Tre spor:\n" + "\n".join(f"- {s}" for s in dom.get('tre_spor', [])) + "\n\n"
+            f"Ambisjon: {dom.get('ambisjon', '')}"
+        )
+
+    # KONTEKST FOR HELSE OG MESTRING
+    hm = ctx.get("kontekst_helse_og_mestring_nfk", {})
+    if hm:
+        parts.append(
+            f"# KONTEKST — Helse og mestring i Nordre Follo\n"
+            f"Tjenester som finnes i dag:\n" + "\n".join(f"- {s}" for s in hm.get('tjenester_som_finnes_i_dag', [])) + "\n\n"
+            f"VIKTIG: Disse tjenestene finnes IKKE og må ikke nevnes:\n" + "\n".join(f"- {s}" for s in hm.get('tjenester_som_IKKE_finnes', [])) + "\n\n"
+            f"Kjente utfordringer:\n" + "\n".join(f"- {s}" for s in hm.get('kjente_utfordringer', []))
+        )
+
+    # INSPIRASJON DELTAKERNE HAR SETT
+    insp = ctx.get("inspirasjonsmodeller_workshopen_har_sett", [])
+    if insp:
+        insp_text = "\n".join(f"- {m['navn']}: {m['kjerne']}" for m in insp)
+        parts.append(f"# INSPIRASJON DELTAKERNE HAR SETT\nDe har sett tre modeller fra andre kommuner rett før denne avstemningen:\n{insp_text}")
+
+    # WORKSHOP-FLYT
+    flyt = ctx.get("workshop_flyt", {})
+    dotvote_kontekst = ctx.get("dotvote_kontekst", {})
+    if flyt or dotvote_kontekst:
+        parts.append(
+            f"# HVOR I WORKSHOPEN ER VI NÅ\n"
+            f"{dotvote_kontekst.get('hva_skjer_pa_slide_12', '')}\n\n"
+            f"Hva kommer etter: {dotvote_kontekst.get('hva_kommer_etter', '')}"
+        )
+
+    # HVA ALTERNATIVENE SKAL VÆRE
+    alts = dotvote_kontekst.get("hva_alternativene_skal_være", "")
+    if alts:
+        parts.append(f"# HVA ALTERNATIVENE SKAL VÆRE\n{alts}")
+
+    # TONE OG SPRÅK
+    tone = ctx.get("tone_og_språk", {})
+    if tone:
+        parts.append(
+            f"# TONE OG SPRÅK\n"
+            f"Skal være:\n" + "\n".join(f"- {s}" for s in tone.get('skal_være', [])) + "\n\n"
+            f"Skal unngås:\n" + "\n".join(f"- {s}" for s in tone.get('skal_unngås', []))
+        )
+
+    # OPPGAVE OG REGLER
+    instr = ctx.get("prompt_instruksjoner_for_dotvote", {})
+    if instr:
+        parts.append(
+            f"# DIN OPPGAVE\n{instr.get('oppgave', '')}\n\n"
+            f"Viktige regler:\n" + "\n".join(f"- {s}" for s in instr.get('viktige_regler', []))
+        )
+
+    # INPUT
+    parts.append(
+        f"# INNSPILL FRA DELTAKERNE\n\n"
+        f"## Karis nye reise (slide 10) — alle steg deltakerne har designet:\n"
+        + ("\n".join(f"- {s}" for s in raw_journey) if raw_journey else "(ingen)") + "\n\n"
+        f"## Hva tar vi med oss (slide 6) — det de var opptatt av at vi unngår:\n"
+        + ("\n".join(f"- {s}" for s in raw_mok) if raw_mok else "(ingen)")
+    )
+
+    # FORMAT
+    parts.append(
+        f"# OUTPUT\n"
+        f"Returner KUN en JSON-array med {min_n}-{max_n} strenger. Ingen forklaring, ingen markdown, ingen kommentarer.\n"
+        f"Eksempel: [\"Tverrfaglig vurderingsteam ved første kontakt\", \"Digital førstelinje før menneskelig kontakt\", ...]"
+    )
+
+    return "\n\n".join(parts)
+
+
+def gemini_dedupe_options(raw_journey: List[str], raw_mok: List[str], min_n: int = 6, max_n: int = 8):
+    """Send kontekstualisert prompt til Gemini. Returner (options, prompt) tuple."""
+    if not gemini_client or (not raw_journey and not raw_mok):
+        return [], None
+    prompt = build_dotvote_prompt(raw_journey, raw_mok, min_n, max_n)
     try:
         from google.genai import types
-        prompt = (
-            f"Du får en liste med innspill fra en workshop med ledergruppen i Helse og mestring (Nordre Follo kommune). "
-            f"Innspillene er steg eller forslag deltakerne har skrevet inn under en øvelse om innbyggerreiser og mestringstorget.\n\n"
-            f"Din oppgave: Slå sammen lignende formuleringer og lag {min_n}-{max_n} distinkte, godt formulerte alternativer på norsk "
-            f"som kan brukes til en prioriteringsavstemning. Behold deltakernes språkbruk så mye som mulig — ikke 'glat ut' "
-            f"med konsulent-norsk. Hvert alternativ skal være KORT (maks 8 ord) og handlingsorientert.\n\n"
-            f"Innspillene:\n" + "\n".join(f"- {s}" for s in raw) + "\n\n"
-            f"Returner KUN en JSON-array med strenger, ingenting annet. Eksempel: [\"Tverrfaglig vurderingsteam\", \"Digital førstelinje\", ...]"
-        )
         resp = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
@@ -324,10 +419,11 @@ def gemini_dedupe_options(raw: List[str], min_n: int = 6, max_n: int = 8) -> Lis
             text = text.strip()
         parsed = json.loads(text)
         if isinstance(parsed, list):
-            return [str(s).strip() for s in parsed if str(s).strip()][:max_n]
+            options = [str(s).strip() for s in parsed if str(s).strip()][:max_n]
+            return options, prompt
     except Exception as e:
         print(f"[Gemini] dedupe feilet: {e}")
-    return []
+    return [], prompt
 
 
 def fallback_dedupe(raw: List[str], max_n: int = 8) -> List[str]:
@@ -346,29 +442,28 @@ def fallback_dedupe(raw: List[str], max_n: int = 8) -> List[str]:
 
 @app.post("/api/round/{round_id}/auto-populate")
 async def auto_populate(round_id: str):
-    """Hent automatisk forslag fra journey-runden, dedupliser med Gemini, og sett som options."""
+    """Hent automatisk forslag fra journey-runden + mok, dedupliser med Gemini, og sett som options."""
     if round_id not in STATE["rounds"]:
         return JSONResponse({"error": "ukjent runde"}, status_code=404)
     r = STATE["rounds"][round_id]
     if r.get("type") != "vote":
         return JSONResponse({"error": "auto-populate fungerer kun for vote-runder"}, status_code=400)
 
-    # Samle rå input
-    raw = collect_journey_steps_text()
-    # Også slå sammen med items fra mok hvis vi ønsker bredere utvalg
+    # Samle rå input separat (Gemini får dem som forskjellige kategorier)
+    raw_journey = collect_journey_steps_text()
     raw_mok = collect_round_items_text("mok")
-    combined = raw + raw_mok
+    combined_count = len(raw_journey) + len(raw_mok)
 
-    if not combined:
+    if combined_count == 0:
         return JSONResponse({"error": "ingen input å hente fra", "ai_used": False}, status_code=200)
 
-    # Forsøk Gemini først
-    options_text = gemini_dedupe_options(combined)
+    # Forsøk Gemini først (med rik kontekst)
+    options_text, prompt_used = gemini_dedupe_options(raw_journey, raw_mok)
     ai_used = bool(options_text)
 
     # Fallback hvis Gemini feiler eller er av
     if not options_text:
-        options_text = fallback_dedupe(combined)
+        options_text = fallback_dedupe(raw_journey + raw_mok)
 
     if not options_text:
         return JSONResponse({"error": "kunne ikke generere alternativer", "ai_used": False}, status_code=500)
@@ -383,10 +478,19 @@ async def auto_populate(round_id: str):
     return {
         "ok": True,
         "ai_used": ai_used,
-        "raw_count": len(combined),
+        "raw_count": combined_count,
+        "raw_journey_count": len(raw_journey),
+        "raw_mok_count": len(raw_mok),
         "option_count": len(options_text),
         "options": [o["text"] for o in r["options"]],
+        "prompt_preview": (prompt_used[:500] + "...") if prompt_used and len(prompt_used) > 500 else prompt_used,
     }
+
+
+@app.get("/api/context")
+async def get_context():
+    """Returner gjeldende workshop-kontekst (for debug og admin-visning)."""
+    return JSONResponse(WORKSHOP_CONTEXT)
 
 
 @app.websocket("/ws")

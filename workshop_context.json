@@ -1,0 +1,112 @@
+{
+  "workshop_name": "Mestringstorget VÅRT — Ledergruppen Helse og mestring",
+  "kommune": "Nordre Follo kommune",
+
+  "domene": {
+    "navn": "Mestringstorget",
+    "kilde": "ØHP 2026–2029, Nordre Follo kommune",
+    "definisjon": "En modell for hvordan kommunen møter henvendelser fra innbyggere om helserelaterte behov og samtidig mobiliserer ressurser. Mestringstorget skal være veien inn til alt Helse og mestring tilbyr — fra frivilligsentralen til sykehjem.",
+    "tre_spor": [
+      "Spor 1: Digital førstelinje — KI-agent og verktøy for selvhjelp",
+      "Spor 2: Tverrfaglig mottak — én felles førstelinje, rask behovsavklaring",
+      "Spor 3: Mottak og forebyggende tjenester — koordinering, veiledning og oppfølging"
+    ],
+    "ambisjon": "Innbyggere skal være selvhjulpne, oppleve tilhørighet, mestre egne liv. Forebygging og tidlig innsats skal bygges inn i måten vi jobber på. Ingen skal ende opp i kostbare og inngripende tjenester fordi systemet ikke fanget dem opp i tide."
+  },
+
+  "kontekst_helse_og_mestring_nfk": {
+    "tjenester_som_finnes_i_dag": [
+      "Mottak (sykepleiere, ergoterapeut, fysioterapeut, demenskoordinator, kreftkoordinator)",
+      "Forebyggende: Frisklivssentral, seniorsentre, seniorkontakter, velferdsteknologi, digital hjemmeoppfølging",
+      "Hjemmebaserte: Hjemmesykepleie, hjemmehjelp, BPA, avlastning",
+      "Institusjon: Korttidsavdeling, sykehjem, dagaktivitetstilbud, omsorgsboliger",
+      "Spesialisert: Rehabilitering, boliger med bemanning, ProaktivMestring (KI), bolig- og mestringslinja"
+    ],
+    "tjenester_som_IKKE_finnes": [
+      "FACT-team voksen (avviklet)"
+    ],
+    "kjente_utfordringer": [
+      "MOK-prosjektet (2023) ble stoppet — fire leveranselinjer ferdigbehandlet",
+      "Spørsmålet om to mottaksavdelinger til én ble aldri løst",
+      "Prosjekttretthet og betente begreper",
+      "Mange parallelle initiativ uten samlet styring"
+    ],
+    "innsparingstiltak": "17 innsparingstiltak i Helse og mestring-området alene. Strategisk bemanning: 12 MNOK i år, 45 MNOK over 4 år."
+  },
+
+  "inspirasjonsmodeller_workshopen_har_sett": [
+    {
+      "navn": "Sandefjord — En vei inn",
+      "kjerne": "Felles vurderingssamtaler kommune + DPS Vestfold. Pasienten får riktig hjelp på riktig nivå ved første kontakt. Ingen kasteballer."
+    },
+    {
+      "navn": "Lillestrøm — Tjenestetorg siden 2006",
+      "kjerne": "Tildeling, ergoterapeut, fysioterapeut, demenskoordinator, boligkontor under ett tak. Sammen om Mestring uten legehenvisning."
+    },
+    {
+      "navn": "Indre Østfold — Helsehuset",
+      "kjerne": "Tverrfaglig vurderingsteam (TVT). Personen eier prosessen. Vurderingsteam, rehabilitering, ØHD, legevakt samlokalisert."
+    }
+  ],
+
+  "workshop_flyt": {
+    "blokk_1": "Innsjekk + kontekst (slide 1-4)",
+    "blokk_2": "Det vi bærer med oss — MOK-historikk + 'hva tar vi med oss' (slide 5-7)",
+    "blokk_3": "Innbyggerens perspektiv — Kari-historien som video + design Karis nye reise (slide 9-10)",
+    "blokk_4": "Inspirasjon — Sandefjord, Lillestrøm, Indre Østfold + dot-voting prioritering (slide 11-12)",
+    "blokk_5": "Tre retningsvalg: Hvem sitter, Hva erstatter vi, Fysisk/digitalt (slide 14-17)",
+    "blokk_6": "Vår forpliktelse + konsensussjekk (slide 19-20)",
+    "blokk_7": "Veien videre + lukking (slide 21-25)"
+  },
+
+  "dotvote_kontekst": {
+    "hva_skjer_pa_slide_12": "Etter at deltakerne har designet Karis nye reise (slide 10) og sett tre inspirasjonseksempler (slide 11), skal de prioritere hva som er viktigst å ta med inn i de tre retningsvalgene.",
+    "hva_kommer_etter": "De tre retningsvalgene på slide 15-17 handler om: (1) Hvem skal sitte i mestringstorget, (2) Hva skal mestringstorget erstatte, (3) Fysisk/digitalt format. Top-3-resultatet fra dot-voting blir input til disse tre rundene.",
+    "hva_alternativene_skal_være": "Konkrete, handlingsorienterte retninger som ledere kan stemme på — IKKE mål eller verdier. Eksempler på godt format: 'Tverrfaglig vurderingsteam', 'Digital førstelinje før menneskelig kontakt', 'Erstatte begge dagens mottak helt', 'Samlokalisering av forebyggende tjenester'. Eksempler på dårlig format: 'Bedre tjenester' (for vagt), 'Vi må jobbe mer sammen' (verdi, ikke retning), 'Innføre Lean i front-line' (for spesifikt og verktøy-orientert)."
+  },
+
+  "tone_og_språk": {
+    "skal_være": [
+      "Lederspråk — folk i ledergruppen forstår strategisk språk",
+      "Konkret og handlingsorientert",
+      "Bygger på det deltakerne FAKTISK har skrevet, ikke generelle ideer fra konsulenter",
+      "Maks 8 ord per alternativ",
+      "Norsk bokmål med korrekte æøå",
+      "Verbformer: substantivisering er OK ('Tverrfaglig vurdering' bedre enn 'Vi må vurdere tverrfaglig')"
+    ],
+    "skal_unngås": [
+      "Konsulent-norsk: 'styrke', 'forsterke', 'optimalisere', 'sikre', 'bærekraftig', 'helhetlig' uten konkret innhold",
+      "For abstrakte verdier: 'mer mestring', 'bedre samhandling'",
+      "Buzzwords: 'innovasjon', 'transformasjon', 'omstilling' uten substans",
+      "Sjargong som ekskluderer noen i ledergruppen",
+      "Engelske ord når norske finnes",
+      "FACT-team (avviklet i NFK)"
+    ],
+    "begreper_å_bruke_riktig": {
+      "mestringstorget": "Modellen — ikke 'tjeneste' eller 'sted'",
+      "ØHP": "Økonomi- og handlingsplan (vedtatt)",
+      "tre_spor": "Spor 1/2/3 (digital/mottak/forebygging)",
+      "innbygger": "Aldri 'bruker' eller 'klient'",
+      "retning": "Det vi setter — ikke 'vedtak'"
+    }
+  },
+
+  "prompt_instruksjoner_for_dotvote": {
+    "rolle": "Du fasiliterer en workshop for ledergruppen i Helse og mestring i Nordre Follo kommune. Du er erfaren i tjenestedesign, kommunal helseorganisering og dialogfasilitering.",
+    "oppgave": "Gruppér deltakernes innspill til 6-8 distinkte, stemmbare retninger som kan brukes i en prioriteringsavstemning. Top-3 fra avstemningen blir mandatet til de tre retningsvalgene som kommer etterpå.",
+    "viktige_regler": [
+      "Behold deltakernes språkbruk og tankegang — IKKE introduser nye ideer",
+      "Slå sammen lignende formuleringer til ÉN godt formulert versjon",
+      "Hvert alternativ skal være KORT (maks 8 ord) og handlingsorientert",
+      "Alternativene skal være distinkte — ikke overlappe hverandre",
+      "Dekk bredden av det som er foreslått — ikke bare det mest vanlige",
+      "Bruk korrekt norsk bokmål med æøå",
+      "Returner KUN en JSON-array med strenger. Ingen forklaring, ingen markdown."
+    ]
+  },
+
+  "klyngesortering_kontekst": {
+    "brukes_på": ["mok", "commit"],
+    "instruksjon": "For 'hva tar vi med oss' (mok) og 'forpliktelsen' (commit) skal klyngene være tematiske grupperinger som hjelper fasilitator å se mønstre i plenum. 3-5 klynger er ideelt."
+  }
+}
