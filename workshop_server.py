@@ -146,6 +146,27 @@ DEFAULT_ROUNDS = {
         "consensus": [],
         "active": False,
     },
+    "who_rating": {
+        "title": "Konsensussjekk: Hvem sitter i mestringstorget",
+        "question": "Hvor godt kan du stille deg bak retningen som kom frem om kompetanse?",
+        "type": "rating",
+        "ratings": [],
+        "active": False,
+    },
+    "replace_rating": {
+        "title": "Konsensussjekk: Hva erstatter vi",
+        "question": "Hvor godt kan du stille deg bak retningen om hva som skal erstattes?",
+        "type": "rating",
+        "ratings": [],
+        "active": False,
+    },
+    "format_rating": {
+        "title": "Konsensussjekk: Fysisk, digitalt eller begge",
+        "question": "Hvor godt kan du stille deg bak retningen om format og lokasjon?",
+        "type": "rating",
+        "ratings": [],
+        "active": False,
+    },
     "commit": {
         "title": "Forpliktelsen",
         "question": "Hva er det viktigste som MÅ skje for at mestringstorget skal bli virkelighet?",
