@@ -83,9 +83,9 @@ DEFAULT_ROUNDS = {
     },
     "journey": {
         "title": "Karis nye reise",
-        "question": "Design Karis reise gjennom mestringstorget — hvert steg",
-        "type": "freetext",
-        "items": [],
+        "question": "Design Karis komplette reise gjennom mestringstorget. Hva skjer steg for steg fra hun tar kontakt til hun mestrer hverdagen?",
+        "type": "journey",
+        "journeys": {},  # user_id -> {"steps": [...], "user_name": str, "ts": str}
         "active": False,
     },
     "dotvote": {
@@ -256,6 +256,8 @@ async def clear_round(round_id: str):
         r["ratings"] = []
     if "consensus" in r:
         r["consensus"] = []
+    if "journeys" in r:
+        r["journeys"] = {}
     save_state()
     await manager.broadcast({"type": "round_cleared", "round_id": round_id, "state": STATE})
     return {"ok": True}
@@ -370,6 +372,46 @@ async def handle_message(data: dict, ws: WebSocket):
             save_state()
             await manager.broadcast({"type": "state", "state": STATE})
 
+    elif msg_type == "submit_journey":
+        # Deltaker sender inn sin komplette reise (liste med steg)
+        round_id = data.get("round_id")
+        if round_id not in STATE["rounds"]:
+            return
+        r = STATE["rounds"][round_id]
+        if r.get("type") == "journey":
+            user_id = data.get("user_id", "anon")
+            steps = [s.strip() for s in data.get("steps", []) if s and s.strip()]
+            if not steps:
+                return
+            r.setdefault("journeys", {})
+            r["journeys"][user_id] = {
+                "steps": steps,
+                "user_name": STATE["participants"].get(user_id, "Anonym"),
+                "ts": datetime.now().isoformat(),
+            }
+            save_state()
+            await manager.broadcast({
+                "type": "journey_updated",
+                "round_id": round_id,
+                "user_id": user_id,
+                "journey": r["journeys"][user_id],
+            })
+
+    elif msg_type == "delete_journey":
+        # Fasilitator (eller deltaker selv) sletter en journey
+        round_id = data.get("round_id")
+        user_id = data.get("user_id")
+        if round_id in STATE["rounds"]:
+            r = STATE["rounds"][round_id]
+            if "journeys" in r and user_id in r["journeys"]:
+                del r["journeys"][user_id]
+                save_state()
+                await manager.broadcast({
+                    "type": "journey_removed",
+                    "round_id": round_id,
+                    "user_id": user_id,
+                })
+
 
 # ---------- HTML TEMPLATES ----------
 
@@ -451,6 +493,20 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .rating-btn:hover { border-color:var(--teal); }
 .rating-btn.selected { background:var(--teal); border-color:var(--teal-l); transform: scale(1.1); }
 .rating-labels { display:flex; justify-content:space-between; font-size:11px; color:#888; }
+
+/* Journey builder */
+.journey-builder { margin-top:14px; }
+.j-step { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.j-step .num { background:var(--teal); color:#fff; width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:14px; flex-shrink:0; }
+.j-step input { flex:1; background:rgba(0,0,0,.3); border:1px solid rgba(255,255,255,.15); border-radius:10px; padding:12px 14px; color:#fff; font-size:15px; font-family:inherit; }
+.j-step input:focus { outline:none; border-color:var(--teal); }
+.j-step .remove { background:rgba(239,68,68,.2); color:#fca5a5; border:1px solid rgba(239,68,68,.3); width:32px; height:32px; border-radius:50%; cursor:pointer; flex-shrink:0; font-size:18px; padding:0; margin:0; line-height:1; }
+.j-step .remove:hover { background:rgba(239,68,68,.5); color:#fff; }
+.j-step.fixed { opacity:.6; }
+.j-step.fixed input { background:rgba(0,168,150,.1); border-color:rgba(0,168,150,.3); pointer-events:none; }
+.j-add { background:rgba(255,255,255,.05); border:1px dashed rgba(255,255,255,.2); color:#888; padding:12px; border-radius:10px; cursor:pointer; width:100%; margin-top:4px; font-size:13px; }
+.j-add:hover { background:rgba(0,168,150,.1); border-color:var(--teal); color:var(--teal-l); }
+.j-saved-banner { background:rgba(34,197,94,.15); border:1px solid rgba(34,197,94,.4); color:#86efac; padding:10px 14px; border-radius:10px; font-size:13px; margin-bottom:12px; text-align:center; }
 </style></head>
 <body>
 <div class="container">
@@ -500,6 +556,16 @@ function connect() {
       if (state) state.rounds[msg.round_id].items = state.rounds[msg.round_id].items.filter(i => i.id !== msg.item_id);
     } else if (msg.type === 'vote_updated') {
       if (state) state.rounds[msg.round_id].votes = msg.votes;
+    } else if (msg.type === 'journey_updated') {
+      if (state) {
+        const r = state.rounds[msg.round_id];
+        if (r) { r.journeys = r.journeys || {}; r.journeys[msg.user_id] = msg.journey; }
+      }
+    } else if (msg.type === 'journey_removed') {
+      if (state) {
+        const r = state.rounds[msg.round_id];
+        if (r && r.journeys) delete r.journeys[msg.user_id];
+      }
     }
     render();
   };
@@ -616,7 +682,70 @@ function render() {
         </div>
         <textarea id="rate-comment" placeholder="Eventuell kommentar..." style="margin-top:14px"></textarea>
       </div>`;
+  } else if (r.type === 'journey') {
+    const mine = (r.journeys || {})[userId];
+    const savedSteps = mine ? mine.steps : null;
+    // Lokal arbeidsstate (for ulagrede endringer) - persisteres ikke mellom render
+    if (!window.journeyDraft || window.journeyDraftRound !== rid) {
+      window.journeyDraft = savedSteps ? savedSteps.slice() : ['', '', ''];
+      window.journeyDraftRound = rid;
+    }
+    const steps = window.journeyDraft;
+    content.innerHTML = `
+      <div class="card active">
+        <div class="label">Aktiv runde — Designe reisen</div>
+        <div class="title">${r.title}</div>
+        <div class="question">${r.question}</div>
+        ${mine ? '<div class="j-saved-banner">✓ Reisen din er sendt. Du kan endre den og sende på nytt.</div>' : ''}
+        <div class="journey-builder">
+          <div class="j-step fixed">
+            <div class="num" style="background:var(--green);">↓</div>
+            <input type="text" value="Kari kontakter mestringstorget" disabled />
+          </div>
+          <div id="journey-steps">
+            ${steps.map((s, i) => `
+              <div class="j-step">
+                <div class="num">${i+1}</div>
+                <input type="text" value="${escape(s)}" placeholder="Beskriv steg ${i+1}..." oninput="updateJourneyStep(${i}, this.value)" />
+                <button class="remove" onclick="removeJourneyStep(${i})" title="Fjern steg">×</button>
+              </div>
+            `).join('')}
+          </div>
+          <button class="j-add" onclick="addJourneyStep()">+ Legg til nytt steg</button>
+          <div class="j-step fixed" style="margin-top:10px;">
+            <div class="num" style="background:var(--green);">✓</div>
+            <input type="text" value="Kari mestrer hverdagen" disabled />
+          </div>
+        </div>
+        <button onclick="sendJourney()" style="margin-top:14px;">${mine ? 'Oppdater min reise' : 'Send min reise'}</button>
+      </div>`;
   }
+}
+
+function updateJourneyStep(idx, val) {
+  if (!window.journeyDraft) return;
+  window.journeyDraft[idx] = val;
+}
+
+function addJourneyStep() {
+  if (!window.journeyDraft) window.journeyDraft = [];
+  if (window.journeyDraft.length >= 8) return;
+  window.journeyDraft.push('');
+  render();
+}
+
+function removeJourneyStep(idx) {
+  if (!window.journeyDraft || window.journeyDraft.length <= 1) return;
+  window.journeyDraft.splice(idx, 1);
+  render();
+}
+
+function sendJourney() {
+  const ar = activeRound();
+  if (!ar) return;
+  const steps = (window.journeyDraft || []).map(s => (s || '').trim()).filter(Boolean);
+  if (!steps.length) return;
+  ws.send(JSON.stringify({type:'submit_journey', round_id:ar[0], user_id:userId, steps}));
 }
 
 function sendOne() {
@@ -734,6 +863,16 @@ function connect() {
       if (state) state.rounds[msg.round_id].votes = msg.votes;
     } else if (msg.type === 'rating_updated') {
       if (state) state.rounds[msg.round_id].ratings = msg.ratings;
+    } else if (msg.type === 'journey_updated') {
+      if (state) {
+        const r = state.rounds[msg.round_id];
+        if (r) { r.journeys = r.journeys || {}; r.journeys[msg.user_id] = msg.journey; }
+      }
+    } else if (msg.type === 'journey_removed') {
+      if (state) {
+        const r = state.rounds[msg.round_id];
+        if (r && r.journeys) delete r.journeys[msg.user_id];
+      }
     }
     render();
   };
@@ -819,6 +958,28 @@ function render() {
         ${ratings.length} av ${Object.keys(state.participants).length} har stemt
         ${ratings.filter(rt => rt.value < 3).length > 0 ? `<div style="color:#ef4444;margin-top:10px">${ratings.filter(rt => rt.value < 3).length} har sterke innvendinger</div>` : ''}
       </div>`;
+  } else if (r.type === 'journey') {
+    const journeys = Object.entries(r.journeys || {});
+    document.getElementById('count').textContent = journeys.length;
+    document.getElementById('count-label').textContent = 'reiser';
+    wall.className = '';
+    if (!journeys.length) {
+      wall.innerHTML = '<div class="empty"><span>&#128679;</span>Venter på første reise...</div>';
+    } else {
+      wall.innerHTML = '<div style="display:flex;flex-direction:column;gap:18px;">' + journeys.map(([uid, j]) => {
+        const stepsHtml = j.steps.map((s, i) => `<div style="background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#1f2937;padding:12px 16px;border-radius:8px;font-size:14px;font-weight:500;flex:1;min-width:140px;box-shadow:0 4px 10px rgba(0,0,0,.3);text-align:center;">${escape(s)}</div>`).join('<div style="font-size:24px;color:rgba(255,255,255,.4);align-self:center;">→</div>');
+        return `<div style="background:rgba(255,255,255,.04);padding:18px;border-radius:14px;border:1px solid rgba(255,255,255,.08);">
+          <div style="font-size:14px;color:#02c8a7;font-weight:700;margin-bottom:12px;letter-spacing:1px;text-transform:uppercase;">${escape(j.user_name || 'Anonym')}</div>
+          <div style="display:flex;align-items:stretch;gap:8px;flex-wrap:wrap;">
+            <div style="background:linear-gradient(135deg,#dcfce7,#bbf7d0);color:#1f2937;padding:12px 16px;border-radius:8px;font-size:14px;font-weight:600;text-align:center;box-shadow:0 4px 10px rgba(0,0,0,.3);">Kontakter mestringstorget</div>
+            <div style="font-size:24px;color:rgba(255,255,255,.4);align-self:center;">→</div>
+            ${stepsHtml}
+            <div style="font-size:24px;color:rgba(255,255,255,.4);align-self:center;">→</div>
+            <div style="background:linear-gradient(135deg,#dcfce7,#bbf7d0);color:#1f2937;padding:12px 16px;border-radius:8px;font-size:14px;font-weight:600;text-align:center;box-shadow:0 4px 10px rgba(0,0,0,.3);">Mestrer hverdagen</div>
+          </div>
+        </div>`;
+      }).join('') + '</div>';
+    }
   }
 }
 
@@ -907,6 +1068,14 @@ function connect() {
     else if (msg.type === 'item_removed' && state) state.rounds[msg.round_id].items = state.rounds[msg.round_id].items.filter(i => i.id !== msg.item_id);
     else if (msg.type === 'vote_updated' && state) state.rounds[msg.round_id].votes = msg.votes;
     else if (msg.type === 'rating_updated' && state) state.rounds[msg.round_id].ratings = msg.ratings;
+    else if (msg.type === 'journey_updated' && state) {
+      const r = state.rounds[msg.round_id];
+      if (r) { r.journeys = r.journeys || {}; r.journeys[msg.user_id] = msg.journey; }
+    }
+    else if (msg.type === 'journey_removed' && state) {
+      const r = state.rounds[msg.round_id];
+      if (r && r.journeys) delete r.journeys[msg.user_id];
+    }
     else if (msg.type === 'participants_updated') { if (state) state.participants = msg.participants; }
     render();
   };
@@ -946,6 +1115,7 @@ function render() {
     if (r.type === 'freetext' || r.type === 'categorized') count = (r.items || []).length;
     else if (r.type === 'vote') count = Object.values(r.votes || {}).reduce((s, arr) => s + arr.length, 0);
     else if (r.type === 'rating') count = (r.ratings || []).length;
+    else if (r.type === 'journey') count = Object.keys(r.journeys || {}).length;
     return `
       <div class="round ${r.active ? 'active' : ''}">
         <h3>${escape(r.title)}</h3>
@@ -987,8 +1157,31 @@ function render() {
     const avg = ratings.length ? (ratings.reduce((s, x) => s + x.value, 0) / ratings.length).toFixed(2) : '-';
     html += `<div style="font-size:32px;color:#02c8a7;font-weight:800">Snitt: ${avg}</div>`;
     html += '<div class="items-list" style="margin-top:14px">' + ratings.map(rt => `<div class="item"><div class="v"><strong>${rt.value}</strong> ${escape(rt.comment || '')}</div><div class="u">${escape(rt.user_name)}</div></div>`).join('') + '</div>';
+  } else if (r.type === 'journey') {
+    const journeys = Object.entries(r.journeys || {});
+    if (!journeys.length) {
+      html += '<div style="color:#888;text-align:center;padding:30px">Ingen reiser sendt enna</div>';
+    } else {
+      html += '<div style="display:flex;flex-direction:column;gap:14px;margin-top:10px;">';
+      journeys.forEach(([uid, j]) => {
+        const stepsHtml = j.steps.map((s, i) => `<div style="background:rgba(0,168,150,.1);border:1px solid rgba(0,168,150,.3);padding:8px 12px;border-radius:8px;font-size:13px;">${i+1}. ${escape(s)}</div>`).join('<div style="color:#666;font-size:18px;align-self:center;">→</div>');
+        html += `<div style="background:rgba(255,255,255,.04);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.08);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <strong style="color:#02c8a7">${escape(j.user_name || 'Anonym')}</strong>
+            <button onclick="deleteJourney('${state.active_round}','${uid}')" style="background:#3a1a1a;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;">slett</button>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">${stepsHtml}</div>
+        </div>`;
+      });
+      html += '</div>';
+    }
   }
   live.innerHTML = html;
+}
+
+function deleteJourney(rid, uid) {
+  if (!confirm('Slett denne reisen?')) return;
+  ws.send(JSON.stringify({type:'delete_journey', round_id:rid, user_id:uid}));
 }
 
 function escape(s) {
