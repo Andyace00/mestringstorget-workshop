@@ -34,6 +34,16 @@
     "innsparingstiltak": "17 innsparingstiltak i Helse og mestring-området alene. Strategisk bemanning: 12 MNOK i år, 45 MNOK over 4 år."
   },
 
+  "nasjonal_kontekst": {
+    "helseministeren_10_april_2026": {
+      "kilde": "Dagens Medisin, 10.04.2026",
+      "url": "https://www.dagensmedisin.no/digitalisering-e-helse-helsedirektoratet/vestre-vil-ha-mer-helse-ki-vi-skal-etablere-en-digital-forstelinje/742053",
+      "sitat_hovedmål": "Vi skal etablere en digital førstelinje",
+      "sitat_ambisjon": "Vi må ha som ambisjon å kunne stille opp med noe som er minst like bra som det folk får når de søker på Google og ChatGPT",
+      "betydning": "Helseminister Jan Christian Vestre sier to dager før denne workshopen at nasjonalt mål er å etablere digital førstelinje med KI-støtte. ØHP 2026-2029 for Nordre Follo har ALLEREDE dette som Spor 1. Nordre Follo er altså i forkant av den nasjonale satsingen, ikke i etterkant."
+    }
+  },
+
   "inspirasjonsmodeller_workshopen_har_sett": [
     {
       "navn": "Sandefjord — En vei inn",
@@ -62,7 +72,8 @@
   "dotvote_kontekst": {
     "hva_skjer_pa_slide_12": "Etter at deltakerne har designet Karis nye reise (slide 10) og sett tre inspirasjonseksempler (slide 11), skal de prioritere hva som er viktigst å ta med inn i de tre retningsvalgene.",
     "hva_kommer_etter": "De tre retningsvalgene på slide 15-17 handler om: (1) Hvem skal sitte i mestringstorget, (2) Hva skal mestringstorget erstatte, (3) Fysisk/digitalt format. Top-3-resultatet fra dot-voting blir input til disse tre rundene.",
-    "hva_alternativene_skal_være": "Konkrete, handlingsorienterte retninger som ledere kan stemme på — IKKE mål eller verdier. Eksempler på godt format: 'Tverrfaglig vurderingsteam', 'Digital førstelinje før menneskelig kontakt', 'Erstatte begge dagens mottak helt', 'Samlokalisering av forebyggende tjenester'. Eksempler på dårlig format: 'Bedre tjenester' (for vagt), 'Vi må jobbe mer sammen' (verdi, ikke retning), 'Innføre Lean i front-line' (for spesifikt og verktøy-orientert)."
+    "hva_alternativene_skal_være": "Konkrete, handlingsorienterte retninger som ledere kan stemme på — IKKE mål eller verdier. Eksempler på godt format: 'Tverrfaglig vurderingsteam', 'Digital førstelinje før menneskelig kontakt', 'Erstatte begge dagens mottak helt', 'Samlokalisering av forebyggende tjenester'. Eksempler på dårlig format: 'Bedre tjenester' (for vagt), 'Vi må jobbe mer sammen' (verdi, ikke retning), 'Innføre Lean i front-line' (for spesifikt og verktøy-orientert).",
+    "tidsbestemt_kontekst": "Ta gjerne med et alternativ som fanger den nasjonale ambisjonen om digital førstelinje (helseministeren, 10. april 2026). Nordre Follo er i forkant av denne satsingen — ikke på etterskudd. Alternativene bør vise bredden fra digital førstelinje via tverrfaglig mottak til forebyggende tjenester."
   },
 
   "tone_og_språk": {
@@ -108,5 +119,17 @@
   "klyngesortering_kontekst": {
     "brukes_på": ["mok", "commit"],
     "instruksjon": "For 'hva tar vi med oss' (mok) og 'forpliktelsen' (commit) skal klyngene være tematiske grupperinger som hjelper fasilitator å se mønstre i plenum. 3-5 klynger er ideelt."
+  },
+
+  "en_setning_prompt": {
+    "oppgave": "Lag én kort, kraftfull setning som oppsummerer hva mestringstorget i Nordre Follo SKAL VÆRE — basert på alt workshopen har kommet frem til. Setningen skal fungere som et felles samlingspunkt som ledergruppen kan stille seg bak.",
+    "format": "Én setning. Maks 25 ord. Form: 'Mestringstorget i Nordre Follo er [hva det er] som gjør at innbyggerne [hva de får] og ansatte [hva de opplever]'. Eller en annen naturlig formulering — ikke tving malen, men hold deg til én setning.",
+    "regler": [
+      "Bygg på det DELTAKERNE faktisk har skrevet — bruk deres språk og tenkning",
+      "Vær konkret, ikke visjonær",
+      "Unngå konsulent-norsk og tomme visjonsord",
+      "Den skal føles som ledergruppens egen formulering, ikke som noe de får servert",
+      "Returner KUN selve setningen som ren tekst — ingen forklaring, ingen markdown, ingen anførselstegn"
+    ]
   }
 }
