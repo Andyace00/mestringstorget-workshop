@@ -101,6 +101,13 @@ DEFAULT_ROUNDS = {
     },
     # behold-runden (Behold/Endre/Slipp) fjernet 2026-04-12:
     # Slide 6 produserer "unngå"-lapper — alt ville havnet i Slipp. Logisk inkonsistent.
+    "carry": {
+        "title": "Hva tar vi med oss — styrker og ressurser",
+        "question": "Hva er du som leder mest opptatt av at vi TAR MED oss når vi nå starter på nytt?",
+        "type": "freetext",
+        "items": [],
+        "active": False,
+    },
     "journey": {
         "title": "Karis nye reise",
         "question": "Design Karis komplette reise gjennom mestringstorget. Hva skjer steg for steg fra hun tar kontakt til hun mestrer hverdagen?",
@@ -344,8 +351,9 @@ def collect_round_items_text(round_id: str) -> List[str]:
     return [(it.get("value") or "").strip() for it in r.get("items", []) if (it.get("value") or "").strip()]
 
 
-def build_dotvote_prompt(raw_journey: List[str], raw_mok: List[str], min_n: int = 6, max_n: int = 8) -> str:
+def build_dotvote_prompt(raw_journey: List[str], raw_mok: List[str], raw_carry: List[str] = None, min_n: int = 6, max_n: int = 8) -> str:
     """Bygg en rik, kontekstualisert prompt for dot-voting basert på workshop_context.json."""
+    raw_carry = raw_carry or []
     ctx = WORKSHOP_CONTEXT
     parts = []
 
@@ -413,7 +421,7 @@ def build_dotvote_prompt(raw_journey: List[str], raw_mok: List[str], min_n: int 
             f"Viktige regler:\n" + "\n".join(f"- {s}" for s in instr.get('viktige_regler', []))
         )
 
-    # INPUT — JOURNEY er hovedkilden. mok er VARSEL-kontekst (negative constraints).
+    # INPUT — JOURNEY er hovedkilden. carry er RESSURSER. mok er VARSLER.
     parts.append(
         f"# HOVEDINPUT — Karis nye reise (slide 10)\n"
         f"Dette er DESIGN-forslag deltakerne har laget. Alternativene du returnerer skal komme HERFRA — "
@@ -422,7 +430,15 @@ def build_dotvote_prompt(raw_journey: List[str], raw_mok: List[str], min_n: int 
     )
 
     parts.append(
-        f"# VARSEL-KONTEKST — Hva deltakerne vil unngå (slide 6)\n"
+        f"# RESSURS-KONTEKST — Styrker deltakerne tar med seg (slide 6)\n"
+        f"Dette er ting deltakerne sier de VIL BEVARE og bygge videre på. Alternativene dine bør "
+        f"gjenkjenne og LØFTE disse ressursene der det passer. Ikke foreslå noe som forkaster det "
+        f"deltakerne allerede sier er verdifullt.\n"
+        + ("\n".join(f"- {s}" for s in raw_carry) if raw_carry else "(ingen)")
+    )
+
+    parts.append(
+        f"# VARSEL-KONTEKST — Bekymringer deltakerne vil unngå (slide 7)\n"
         f"Dette er IKKE forslag til alternativer. Dette er ting deltakerne er BEKYMRET for. "
         f"Bruk listen som sjekkpunkt: alternativene dine MÅ IKKE bryte med disse bekymringene. "
         f"Hvis et alternativ fra reisen ville forsterket en av disse bekymringene, velg et annet alternativ "
@@ -440,11 +456,12 @@ def build_dotvote_prompt(raw_journey: List[str], raw_mok: List[str], min_n: int 
     return "\n\n".join(parts)
 
 
-def gemini_dedupe_options(raw_journey: List[str], raw_mok: List[str], min_n: int = 6, max_n: int = 8):
+def gemini_dedupe_options(raw_journey: List[str], raw_mok: List[str], raw_carry: List[str] = None, min_n: int = 6, max_n: int = 8):
     """Send kontekstualisert prompt til Gemini. Returner (options, prompt) tuple."""
-    if not gemini_client or (not raw_journey and not raw_mok):
+    raw_carry = raw_carry or []
+    if not gemini_client or (not raw_journey and not raw_mok and not raw_carry):
         return [], None
-    prompt = build_dotvote_prompt(raw_journey, raw_mok, min_n, max_n)
+    prompt = build_dotvote_prompt(raw_journey, raw_mok, raw_carry, min_n, max_n)
     try:
         from google.genai import types
         resp = gemini_client.models.generate_content(
@@ -497,18 +514,19 @@ async def auto_populate(round_id: str):
     # Samle rå input separat (Gemini får dem som forskjellige kategorier)
     raw_journey = collect_journey_steps_text()
     raw_mok = collect_round_items_text("mok")
-    combined_count = len(raw_journey) + len(raw_mok)
+    raw_carry = collect_round_items_text("carry")
+    combined_count = len(raw_journey) + len(raw_mok) + len(raw_carry)
 
     if combined_count == 0:
         return JSONResponse({"error": "ingen input å hente fra", "ai_used": False}, status_code=200)
 
     # Forsøk Gemini først (med rik kontekst)
-    options_text, prompt_used = gemini_dedupe_options(raw_journey, raw_mok)
+    options_text, prompt_used = gemini_dedupe_options(raw_journey, raw_mok, raw_carry)
     ai_used = bool(options_text)
 
     # Fallback hvis Gemini feiler eller er av
     if not options_text:
-        options_text = fallback_dedupe(raw_journey + raw_mok)
+        options_text = fallback_dedupe(raw_journey + raw_carry + raw_mok)
 
     if not options_text:
         return JSONResponse({"error": "kunne ikke generere alternativer", "ai_used": False}, status_code=500)
@@ -577,10 +595,15 @@ def build_sentence_prompt() -> str:
     # Alle innspill fra workshopen
     parts.append("# INNSPILL FRA WORKSHOPEN")
 
-    # Hva tar vi med oss
+    # Hva tar vi med oss (styrker)
+    carry = collect_round_items_text("carry")
+    if carry:
+        parts.append("## Styrker deltakerne tar med seg (slide 6):\n" + "\n".join(f"- {s}" for s in carry))
+
+    # Hva vi vil unngå (bekymringer)
     mok = collect_round_items_text("mok")
     if mok:
-        parts.append("## Hva deltakerne vil unngå (slide 6):\n" + "\n".join(f"- {s}" for s in mok))
+        parts.append("## Bekymringer deltakerne vil unngå (slide 7):\n" + "\n".join(f"- {s}" for s in mok))
 
     # Karis nye reise
     journeys = STATE["rounds"].get("journey", {}).get("journeys", {})
