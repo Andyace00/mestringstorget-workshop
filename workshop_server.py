@@ -148,23 +148,26 @@ DEFAULT_ROUNDS = {
     },
     "who_rating": {
         "title": "Konsensussjekk: Hvem sitter i mestringstorget",
-        "question": "Hvor godt kan du stille deg bak retningen som kom frem om kompetanse?",
+        "question": "Hvor godt kan du stille deg bak retningen som kom frem?",
         "type": "rating",
         "ratings": [],
+        "parent": "who",
         "active": False,
     },
     "replace_rating": {
         "title": "Konsensussjekk: Hva erstatter vi",
-        "question": "Hvor godt kan du stille deg bak retningen om hva som skal erstattes?",
+        "question": "Hvor godt kan du stille deg bak retningen som kom frem?",
         "type": "rating",
         "ratings": [],
+        "parent": "replace",
         "active": False,
     },
     "format_rating": {
         "title": "Konsensussjekk: Fysisk, digitalt eller begge",
-        "question": "Hvor godt kan du stille deg bak retningen om format og lokasjon?",
+        "question": "Hvor godt kan du stille deg bak retningen som kom frem?",
         "type": "rating",
         "ratings": [],
+        "parent": "format",
         "active": False,
     },
     "commit": {
@@ -890,6 +893,15 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .rating-btn.selected { background:var(--teal); border-color:var(--teal-l); transform: scale(1.1); }
 .rating-labels { display:flex; justify-content:space-between; font-size:11px; color:#888; }
 
+/* Rating-kontekst (viser hva du stemmer på) */
+.rating-context { background:rgba(0,168,150,.08); border:1px solid rgba(0,168,150,.25); border-radius:12px; padding:14px 16px; margin-top:12px; }
+.rating-context .ctx-label { font-size:11px; color:var(--teal-l); letter-spacing:1.5px; text-transform:uppercase; font-weight:700; margin-bottom:6px; }
+.rating-context .ctx-title { font-size:15px; color:#fff; font-weight:600; margin-bottom:10px; line-height:1.3; }
+.rating-context .ctx-items { display:flex; flex-direction:column; gap:6px; max-height:240px; overflow-y:auto; padding-right:4px; }
+.rating-context .ctx-item { background:rgba(255,255,255,.06); border-left:2px solid var(--teal); padding:7px 10px; border-radius:6px; font-size:13px; color:rgba(255,255,255,.85); line-height:1.35; }
+.rating-context .ctx-item.ctx-more { border-left-color:rgba(255,255,255,.2); font-style:italic; color:rgba(255,255,255,.5); text-align:center; }
+.rating-confirmed { background:rgba(34,197,94,.15); border:1px solid rgba(34,197,94,.4); color:#86efac; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:12px; text-align:center; }
+
 /* Sorteringskort for categorized-runden (BEHOLD/ENDRE/SLIPP) */
 .sort-item { background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); border-radius:10px; padding:12px; margin-bottom:8px; }
 .sort-item .sort-text { font-size:14px; color:#fff; font-weight:500; }
@@ -1099,11 +1111,31 @@ function render() {
   } else if (r.type === 'rating') {
     const myRating = (r.ratings || []).find(x => x.user_id === userId);
     const sel = myRating ? myRating.value : 0;
+
+    // Hent parent-runde hvis definert, vis lapper som kontekst for hva man stemmer paa
+    let parentHtml = '';
+    if (r.parent && state.rounds[r.parent]) {
+      const parent = state.rounds[r.parent];
+      const items = parent.items || [];
+      if (items.length > 0) {
+        parentHtml = `
+          <div class="rating-context">
+            <div class="ctx-label">Du stemmer på retningen som kom frem om:</div>
+            <div class="ctx-title">${escape(parent.question || parent.title || '')}</div>
+            <div class="ctx-items">
+              ${items.slice(0, 20).map(it => `<div class="ctx-item">${escape(it.value)}</div>`).join('')}
+              ${items.length > 20 ? `<div class="ctx-item ctx-more">+ ${items.length - 20} flere</div>` : ''}
+            </div>
+          </div>`;
+      }
+    }
+
     content.innerHTML = `
       <div class="card active">
         <div class="label">Aktiv runde — Konsensussjekk</div>
         <div class="title">${r.title}</div>
-        <div class="question">${r.question}</div>
+        ${parentHtml}
+        <div class="question" style="margin-top:14px;">${r.question}</div>
         <div class="rating-row">
           ${[1,2,3,4,5].map(v => `<button class="rating-btn ${sel === v ? 'selected' : ''}" onclick="rate('${rid}',${v})">${v}</button>`).join('')}
         </div>
@@ -1111,6 +1143,7 @@ function render() {
           <span>Kan ikke leve</span><span></span><span>Kan leve med</span><span></span><span>Helt enig</span>
         </div>
         <textarea id="rate-comment" placeholder="Eventuell kommentar..." style="margin-top:14px"></textarea>
+        ${myRating ? '<div class="rating-confirmed">✓ Du stemte <strong>' + sel + '</strong>. Du kan endre ved å klikke en annen.</div>' : ''}
       </div>`;
   } else if (r.type === 'journey') {
     const mine = (r.journeys || {})[userId];
