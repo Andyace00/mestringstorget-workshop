@@ -43,6 +43,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+# Gemini for AI-deduplisering / klyngesortering (valgfri)
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+gemini_client = None
+if GEMINI_KEY:
+    try:
+        from google import genai
+        gemini_client = genai.Client(api_key=GEMINI_KEY)
+        print(f"Gemini aktiv for AI-deduplisering")
+    except Exception as e:
+        print(f"Gemini ikke tilgjengelig: {e}")
+
 BASE_DIR = Path(__file__).parent
 DATA_FILE = BASE_DIR / "workshop_data.json"
 
@@ -261,6 +272,121 @@ async def clear_round(round_id: str):
     save_state()
     await manager.broadcast({"type": "round_cleared", "round_id": round_id, "state": STATE})
     return {"ok": True}
+
+
+def collect_journey_steps_text() -> List[str]:
+    """Hent alle steg fra journey-runden som rå tekst (med duplikater)."""
+    journeys = STATE["rounds"].get("journey", {}).get("journeys", {})
+    out = []
+    for j in journeys.values():
+        for s in j.get("steps", []):
+            s = (s or "").strip()
+            if s:
+                out.append(s)
+    return out
+
+
+def collect_round_items_text(round_id: str) -> List[str]:
+    """Hent alle items fra en runde som rå tekst."""
+    r = STATE["rounds"].get(round_id, {})
+    return [(it.get("value") or "").strip() for it in r.get("items", []) if (it.get("value") or "").strip()]
+
+
+def gemini_dedupe_options(raw: List[str], min_n: int = 6, max_n: int = 8) -> List[str]:
+    """Send rå tekst-liste til Gemini, få tilbake 6-8 unike, godt formulerte forslag."""
+    if not gemini_client or not raw:
+        return []
+    try:
+        from google.genai import types
+        prompt = (
+            f"Du får en liste med innspill fra en workshop med ledergruppen i Helse og mestring (Nordre Follo kommune). "
+            f"Innspillene er steg eller forslag deltakerne har skrevet inn under en øvelse om innbyggerreiser og mestringstorget.\n\n"
+            f"Din oppgave: Slå sammen lignende formuleringer og lag {min_n}-{max_n} distinkte, godt formulerte alternativer på norsk "
+            f"som kan brukes til en prioriteringsavstemning. Behold deltakernes språkbruk så mye som mulig — ikke 'glat ut' "
+            f"med konsulent-norsk. Hvert alternativ skal være KORT (maks 8 ord) og handlingsorientert.\n\n"
+            f"Innspillene:\n" + "\n".join(f"- {s}" for s in raw) + "\n\n"
+            f"Returner KUN en JSON-array med strenger, ingenting annet. Eksempel: [\"Tverrfaglig vurderingsteam\", \"Digital førstelinje\", ...]"
+        )
+        resp = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                response_mime_type="application/json",
+            ),
+        )
+        text = resp.text.strip()
+        # Robust JSON-parsing
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(s).strip() for s in parsed if str(s).strip()][:max_n]
+    except Exception as e:
+        print(f"[Gemini] dedupe feilet: {e}")
+    return []
+
+
+def fallback_dedupe(raw: List[str], max_n: int = 8) -> List[str]:
+    """Enkel string-basert deduplisering når Gemini ikke er tilgjengelig."""
+    seen_lower = set()
+    out = []
+    for s in raw:
+        key = s.lower().strip()
+        if key and key not in seen_lower:
+            seen_lower.add(key)
+            out.append(s.strip())
+        if len(out) >= max_n:
+            break
+    return out
+
+
+@app.post("/api/round/{round_id}/auto-populate")
+async def auto_populate(round_id: str):
+    """Hent automatisk forslag fra journey-runden, dedupliser med Gemini, og sett som options."""
+    if round_id not in STATE["rounds"]:
+        return JSONResponse({"error": "ukjent runde"}, status_code=404)
+    r = STATE["rounds"][round_id]
+    if r.get("type") != "vote":
+        return JSONResponse({"error": "auto-populate fungerer kun for vote-runder"}, status_code=400)
+
+    # Samle rå input
+    raw = collect_journey_steps_text()
+    # Også slå sammen med items fra mok hvis vi ønsker bredere utvalg
+    raw_mok = collect_round_items_text("mok")
+    combined = raw + raw_mok
+
+    if not combined:
+        return JSONResponse({"error": "ingen input å hente fra", "ai_used": False}, status_code=200)
+
+    # Forsøk Gemini først
+    options_text = gemini_dedupe_options(combined)
+    ai_used = bool(options_text)
+
+    # Fallback hvis Gemini feiler eller er av
+    if not options_text:
+        options_text = fallback_dedupe(combined)
+
+    if not options_text:
+        return JSONResponse({"error": "kunne ikke generere alternativer", "ai_used": False}, status_code=500)
+
+    # Lagre som options
+    r["options"] = [{"id": f"o{i}", "text": t} for i, t in enumerate(options_text)]
+    # Nullstill stemmer ved auto-populate
+    r["votes"] = {}
+    save_state()
+    await manager.broadcast({"type": "state", "state": STATE})
+
+    return {
+        "ok": True,
+        "ai_used": ai_used,
+        "raw_count": len(combined),
+        "option_count": len(options_text),
+        "options": [o["text"] for o in r["options"]],
+    }
 
 
 @app.websocket("/ws")
