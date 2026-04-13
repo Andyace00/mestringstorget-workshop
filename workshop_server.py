@@ -800,6 +800,45 @@ async def handle_message(data: dict, ws: WebSocket):
             save_state()
             await manager.broadcast({"type": "rating_updated", "round_id": round_id, "ratings": r["ratings"]})
 
+    elif msg_type == "update_item":
+        # Fasilitator redigerer en eksisterende item direkte (brukes paa slide 20 for forpliktelser)
+        round_id = data.get("round_id")
+        item_id = data.get("item_id")
+        new_value = (data.get("value") or "").strip()
+        if round_id in STATE["rounds"] and new_value:
+            r = STATE["rounds"][round_id]
+            for it in r.get("items", []):
+                if it.get("id") == item_id:
+                    it["value"] = new_value
+                    it["edited_ts"] = datetime.now().isoformat()
+                    save_state()
+                    await manager.broadcast({
+                        "type": "item_updated",
+                        "round_id": round_id,
+                        "item": it,
+                    })
+                    break
+
+    elif msg_type == "add_item":
+        # Fasilitator legger til en ny item manuelt (paa slide 20 for aa fylle inn manglende forpliktelser)
+        round_id = data.get("round_id")
+        new_value = (data.get("value") or "").strip()
+        if round_id in STATE["rounds"] and new_value:
+            r = STATE["rounds"][round_id]
+            item = {
+                "id": f"{round_id}_manual_{len(r.get('items', []))}_{datetime.now().timestamp()}",
+                "user_id": "facilitator",
+                "user_name": data.get("user_name", "Fasilitator"),
+                "value": new_value,
+                "category": None,
+                "source_id": None,
+                "cluster": None,
+                "ts": datetime.now().isoformat(),
+            }
+            r.setdefault("items", []).append(item)
+            save_state()
+            await manager.broadcast({"type": "item_added", "round_id": round_id, "item": item})
+
     elif msg_type == "delete_item":
         round_id = data.get("round_id")
         item_id = data.get("item_id")
