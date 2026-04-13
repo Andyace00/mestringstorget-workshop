@@ -645,9 +645,10 @@ def build_sentence_prompt() -> str:
         if top3:
             parts.append("## Top 3 prioritert av ledergruppen (slide 12):\n" + "\n".join(f"- {s}" for s in top3))
 
-    # Tre retningsvalg
+    # Fire retningsvalg
     for rid, label in [("who", "Hvem sitter i mestringstorget (slide 15)"),
                        ("replace", "Hva erstatter vi (slide 16)"),
+                       ("keep", "Hva beholder vi (slide 16b)"),
                        ("format", "Fysisk/digitalt format (slide 17)")]:
         items = collect_round_items_text(rid)
         if items:
