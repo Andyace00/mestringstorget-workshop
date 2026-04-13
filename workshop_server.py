@@ -93,7 +93,7 @@ if SCENE_IMAGES_DIR.exists():
 
 DEFAULT_ROUNDS = {
     "mok": {
-        "title": "Hva tar vi med oss",
+        "title": "Hva vil vi unngå",
         "question": "Hva er du som leder mest opptatt av at vi unngår — når vi nå starter på nytt?",
         "type": "freetext",
         "items": [],
