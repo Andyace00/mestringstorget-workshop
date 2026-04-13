@@ -1121,11 +1121,81 @@ function rate(roundId, value) {
   ws.send(JSON.stringify({type:'rate', round_id:roundId, user_id:userId, value, comment}));
 }
 
+// Fanger verdi + markør + fokus fra input-elementer FØR re-render,
+// slik at en deltakers input ikke forsvinner når en annen deltaker sender inn.
+function captureInputState() {
+  const st = {};
+  const ta = document.getElementById('ta');
+  if (ta) {
+    st.ta = {
+      value: ta.value,
+      selStart: ta.selectionStart,
+      selEnd: ta.selectionEnd,
+      focused: document.activeElement === ta
+    };
+  }
+  const rc = document.getElementById('rate-comment');
+  if (rc) {
+    st.rc = {
+      value: rc.value,
+      selStart: rc.selectionStart,
+      selEnd: rc.selectionEnd,
+      focused: document.activeElement === rc
+    };
+  }
+  const jInputs = document.querySelectorAll('#journey-steps input');
+  if (jInputs.length) {
+    st.jFocusIdx = -1;
+    jInputs.forEach((inp, idx) => {
+      if (document.activeElement === inp) {
+        st.jFocusIdx = idx;
+        st.jSelStart = inp.selectionStart;
+        st.jSelEnd = inp.selectionEnd;
+      }
+    });
+  }
+  return st;
+}
+
+function restoreInputState(st) {
+  if (!st) return;
+  if (st.ta) {
+    const ta = document.getElementById('ta');
+    if (ta) {
+      ta.value = st.ta.value;
+      if (st.ta.focused) {
+        ta.focus();
+        try { ta.setSelectionRange(st.ta.selStart, st.ta.selEnd); } catch(e) {}
+      }
+    }
+  }
+  if (st.rc) {
+    const rc = document.getElementById('rate-comment');
+    if (rc) {
+      rc.value = st.rc.value;
+      if (st.rc.focused) {
+        rc.focus();
+        try { rc.setSelectionRange(st.rc.selStart, st.rc.selEnd); } catch(e) {}
+      }
+    }
+  }
+  if (typeof st.jFocusIdx === 'number' && st.jFocusIdx >= 0) {
+    const inputs = document.querySelectorAll('#journey-steps input');
+    const inp = inputs[st.jFocusIdx];
+    if (inp) {
+      inp.focus();
+      try { inp.setSelectionRange(st.jSelStart, st.jSelEnd); } catch(e) {}
+    }
+  }
+}
+
 function render() {
   const content = document.getElementById('content');
+  const inputSnapshot = captureInputState();
   const ar = activeRound();
   if (!ar) {
     content.innerHTML = '<div class="card empty">Venter pa fasilitator a starte en runde...</div>';
+    restoreInputState(inputSnapshot);
     return;
   }
   const [rid, r] = ar;
@@ -1283,6 +1353,8 @@ function render() {
         <button onclick="sendJourney()" style="margin-top:14px;">${mine ? 'Oppdater min reise' : 'Send min reise'}</button>
       </div>`;
   }
+  // Restore unsaved input from before re-render (fix: annens submit skal ikke blåse vekk ditt utkast)
+  restoreInputState(inputSnapshot);
 }
 
 function updateJourneyStep(idx, val) {
